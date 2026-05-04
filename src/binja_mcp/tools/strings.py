@@ -43,23 +43,31 @@ def search_strings(
     bv = session.bv
 
     raw = bv.get_strings() if hasattr(bv, "get_strings") else []
+    matcher = _build_matcher(pattern, regex=regex, case_sensitive=case_sensitive)
 
-    if regex and pattern is not None and pattern != "":
-        items = _match_regex(raw, pattern=pattern, case_sensitive=case_sensitive)
+    if regex and pattern:
+        # Run regex matching under a watchdog to defeat catastrophic backtracking.
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            try:
+                items = ex.submit(_collect, raw, matcher).result(
+                    timeout=STRING_REGEX_TIMEOUT_S
+                )
+            except FuturesTimeout as exc:
+                raise TimeoutError(
+                    f"regex match exceeded {STRING_REGEX_TIMEOUT_S}s"
+                ) from exc
     else:
-        matcher = _build_plain_matcher(pattern, case_sensitive=case_sensitive)
         items = _collect(raw, matcher)
 
     return paginate(items, offset=offset, limit=limit)
 
 
 def _collect(raw, matcher) -> list[dict[str, Any]]:
+    """Project matching strings into a JSON-friendly list."""
     result: list[dict[str, Any]] = []
     for s in raw or []:
         value = getattr(s, "value", None)
-        if value is None:
-            continue
-        if not matcher(value):
+        if value is None or not matcher(value):
             continue
         addr = getattr(s, "address", None) or getattr(s, "start", None)
         result.append(
@@ -72,51 +80,15 @@ def _collect(raw, matcher) -> list[dict[str, Any]]:
     return result
 
 
-def _match_regex(raw, *, pattern: str, case_sensitive: bool) -> list[dict[str, Any]]:
-    flags = 0 if case_sensitive else re.IGNORECASE
-    compiled = re.compile(pattern, flags)
-
-    def _run() -> list[dict[str, Any]]:
-        result: list[dict[str, Any]] = []
-        for s in raw or []:
-            value = getattr(s, "value", None)
-            if value is None:
-                continue
-            if not compiled.search(value):
-                continue
-            addr = getattr(s, "address", None) or getattr(s, "start", None)
-            result.append(
-                {
-                    "value": value,
-                    "address": hex_or_none(addr),
-                    "length": getattr(s, "length", len(value)),
-                }
-            )
-        return result
-
-    with ThreadPoolExecutor(max_workers=1) as ex:
-        try:
-            return ex.submit(_run).result(timeout=STRING_REGEX_TIMEOUT_S)
-        except FuturesTimeout as exc:
-            raise TimeoutError(
-                f"regex match exceeded {STRING_REGEX_TIMEOUT_S}s"
-            ) from exc
-
-
-def _build_plain_matcher(pattern: str | None, *, case_sensitive: bool):
-    """Build a fast plain-string matcher (no regex, no timeout needed)."""
+def _build_matcher(pattern: str | None, *, regex: bool, case_sensitive: bool):
+    """Return a value→bool predicate for the requested mode."""
     if pattern is None or pattern == "":
         return lambda _v: True
+    if regex:
+        flags = 0 if case_sensitive else re.IGNORECASE
+        compiled = re.compile(pattern, flags)
+        return lambda v: bool(compiled.search(v))
     if case_sensitive:
         return lambda v: pattern in v
     needle = pattern.lower()
     return lambda v: needle in v.lower()
-
-
-# Keep for backward compatibility if anything imported it
-def _build_matcher(pattern: str | None, *, regex: bool, case_sensitive: bool):
-    if regex and pattern is not None and pattern != "":
-        flags = 0 if case_sensitive else re.IGNORECASE
-        compiled = re.compile(pattern, flags)
-        return lambda v: bool(compiled.search(v))
-    return _build_plain_matcher(pattern, case_sensitive=case_sensitive)
