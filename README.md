@@ -85,10 +85,41 @@ command = "binja-mcp"
 args = []
 ```
 
+## Security
+
+binja-mcp exposes powerful analysis capabilities to LLM agents. Operate it with the principle of least privilege.
+
+**Path allowlist** — restrict which directories the server may open:
+
+```bash
+export BINJA_MCP_ALLOWED_ROOTS="/home/user/binaries:/mnt/samples"
+binja-mcp
+```
+
+**Network transport** — SSE and HTTP transports are disabled by default. The server binds only to `127.0.0.1` when enabled; you are responsible for TLS, authentication, and firewall rules:
+
+```bash
+binja-mcp --transport sse  # listens on http://127.0.0.1:8000/sse
+```
+
+**Mock backend** — `BINJA_MCP_FORCE_MOCK=1` is intended for CI/testing only. Real analysis requires a licensed Binary Ninja install; mock auto-fallback is not enabled in production.
+
+See [`docs/security.md`](docs/security.md) for the full threat model and deployment guidance.
+
+## Live tests
+
+Run against a real Binary Ninja installation:
+
+```bash
+BINJA_MCP_LIVE_TARGET=/path/to/real/binary pytest -m live
+```
+
+Requires `binaryninja` importable and a valid Commercial/Ultimate license.
+
 ## Test
 
 ```bash
-pytest                               # 39 tests, no Binary Ninja needed
+pytest                               # all unit/mock tests, no BN license needed
 pytest --cov=binja_mcp               # with coverage
 ```
 

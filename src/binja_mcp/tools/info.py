@@ -33,10 +33,15 @@ def binary_info(binary_id: str, ctx: Context) -> dict[str, Any]:
     file_obj = getattr(bv, "file", None)
     filename = getattr(file_obj, "filename", None) or session.path
 
+    funcs = getattr(bv, "functions", None)
     try:
-        function_count = len(list(getattr(bv, "functions", []) or []))
-    except Exception:
-        function_count = None
+        function_count = len(funcs) if funcs is not None else None
+    except TypeError:
+        # funcs doesn't support len() — fall back to iteration
+        try:
+            function_count = len(list(funcs))
+        except Exception:
+            function_count = None
 
     return {
         "binary_id": binary_id,

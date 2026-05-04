@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..errors import binary_not_found, function_not_found, invalid_il_level
 from ..session import Session
 from ..supervisor import BinaryNotFoundError, Supervisor
 from ..utils import parse_address
@@ -17,8 +18,8 @@ def get_session(supervisor: Supervisor, binary_id: str) -> Session:
     """Look up an open session, raising a clean ValueError if missing."""
     try:
         return supervisor.get(binary_id)
-    except BinaryNotFoundError as exc:
-        raise ValueError(f"unknown binary_id: {binary_id}") from exc
+    except BinaryNotFoundError:
+        raise binary_not_found(binary_id) from None
 
 
 def find_function(bv: Any, addr_or_name: str | int) -> Any:
@@ -70,7 +71,7 @@ def find_function(bv: Any, addr_or_name: str | int) -> Any:
             if func is not None:
                 return func
 
-    raise ValueError(f"function not found: {addr_or_name!r}")
+    raise function_not_found(addr_or_name)
 
 
 def function_to_summary(func: Any) -> dict[str, Any]:
@@ -129,7 +130,7 @@ def il_text(func: Any, level: str) -> str:
     level_lower = level.lower()
     attr = {"llil": "llil", "mlil": "mlil", "hlil": "hlil"}.get(level_lower)
     if attr is None:
-        raise ValueError(f"unknown IL level: {level!r} (expected LLIL/MLIL/HLIL)")
+        raise invalid_il_level(level)
     il = getattr(func, attr, None)
     if il is None:
         raise ValueError(f"function has no {level.upper()}")
@@ -160,3 +161,50 @@ def il_text(func: Any, level: str) -> str:
             return text  # last-ditch fallback
 
     return "\n".join(lines) if lines else text
+
+
+# ---------------------------------------------------------------------------
+# BinaryView adapter helpers — normalise real BN vs mock attribute differences
+# Defined here for future import by info.py and other tool modules.
+# ---------------------------------------------------------------------------
+
+
+def get_arch_name(bv: Any) -> str | None:
+    """Return architecture name from real BN (bv.arch.name) or mock (bv.arch_name)."""
+    arch = getattr(bv, "arch", None)
+    if arch is not None:
+        name = getattr(arch, "name", None)
+        if name is not None:
+            return str(name)
+    # Mock backend may expose arch_name directly
+    direct = getattr(bv, "arch_name", None)
+    if direct is not None:
+        return str(direct)
+    return None
+
+
+def get_platform_name(bv: Any) -> str | None:
+    """Return platform name from real BN (bv.platform.name) or mock (bv.platform_name)."""
+    platform = getattr(bv, "platform", None)
+    if platform is not None:
+        name = getattr(platform, "name", None)
+        if name is not None:
+            return str(name)
+    direct = getattr(bv, "platform_name", None)
+    if direct is not None:
+        return str(direct)
+    return None
+
+
+def get_function_count(bv: Any) -> int | None:
+    """Return number of functions from real BN or mock BinaryView."""
+    functions = getattr(bv, "functions", None)
+    if functions is not None:
+        try:
+            return len(functions)
+        except TypeError:
+            try:
+                return sum(1 for _ in functions)
+            except Exception:
+                pass
+    return None

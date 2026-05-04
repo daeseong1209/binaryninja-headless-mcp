@@ -10,8 +10,10 @@ Pattern is inspired by mrexodia/ida-pro-mcp's supervisor for multi-DB workers.
 from __future__ import annotations
 
 import logging
+import os
+import secrets
 import threading
-import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +21,8 @@ from .bn_env import import_binaryninja, is_mock_only
 from .session import Session
 
 log = logging.getLogger(__name__)
+
+MAX_OPEN_BINARIES = 32
 
 
 class BinaryNotFoundError(KeyError):
@@ -34,7 +38,7 @@ class Supervisor:
         # Decide backend once at construction. force_mock=None -> use env var.
         if force_mock is None:
             force_mock = is_mock_only()
-        self._bn, self._is_mock = import_binaryninja(allow_mock=True)
+        self._bn, self._is_mock = import_binaryninja(allow_mock=force_mock)
         if force_mock and not self._is_mock:
             from . import mock_backend
 
@@ -52,6 +56,7 @@ class Supervisor:
         Raises:
             FileNotFoundError: if path does not exist.
             RuntimeError: if Binary Ninja fails to load the file.
+            RuntimeError: if the open binary cap is exceeded.
         """
         p = Path(path)
         if not p.exists():
@@ -59,15 +64,20 @@ class Supervisor:
         if not p.is_file():
             raise ValueError(f"not a regular file: {path}")
 
+        with self._lock:
+            if len(self._sessions) >= MAX_OPEN_BINARIES:
+                raise RuntimeError(f"too many open binaries (max {MAX_OPEN_BINARIES})")
+
         bv = self._bn.load(str(p), update_analysis=update_analysis)
         if bv is None:
             raise RuntimeError(f"binaryninja could not load: {path}")
 
-        binary_id = uuid.uuid4().hex[:12]
+        binary_id = secrets.token_hex(16)
         session = Session(binary_id=binary_id, path=str(p), bv=bv, is_mock=self._is_mock)
         with self._lock:
             self._sessions[binary_id] = session
-        log.info("opened binary %s -> %s", path, binary_id)
+        log.info("opened binary %s -> %s", os.path.basename(path), binary_id)
+        log.debug("opened binary full path %s -> %s", path, binary_id)
         return binary_id
 
     def close(self, binary_id: str) -> None:
@@ -77,7 +87,7 @@ class Supervisor:
         if session is None:
             raise BinaryNotFoundError(binary_id)
         session.close()
-        log.info("closed binary %s (%s)", binary_id, session.path)
+        log.info("closed binary %s (%s)", binary_id, os.path.basename(session.path))
 
     def get(self, binary_id: str) -> Session:
         """Look up an open session, raising BinaryNotFoundError if missing."""
@@ -87,6 +97,18 @@ class Supervisor:
             raise BinaryNotFoundError(binary_id)
         session.touch()
         return session
+
+    @contextmanager
+    def use_session(self, binary_id: str):
+        """Context manager that looks up a session and enters its use() guard.
+
+        Raises:
+            BinaryNotFoundError: if binary_id is not registered.
+            RuntimeError: if the session is already closed.
+        """
+        session = self.get(binary_id)
+        with session.use():
+            yield session
 
     def list(self) -> list[dict[str, Any]]:
         """Return metadata for all open sessions."""

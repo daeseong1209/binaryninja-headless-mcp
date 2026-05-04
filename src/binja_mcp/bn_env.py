@@ -30,13 +30,23 @@ def configure_environment() -> None:
         os.environ.setdefault(key, value)
 
 
-def import_binaryninja(allow_mock: bool = True):
+def import_binaryninja(allow_mock: bool = False):
     """Import the real binaryninja module, or fall back to the mock backend.
+
+    If BINJA_MCP_ALLOW_MOCK=1 or BINJA_MCP_FORCE_MOCK=1 is set, allow_mock is
+    automatically promoted to True regardless of the caller-supplied value.
 
     Returns:
         Tuple of (module, is_mock).
     """
     configure_environment()
+
+    # Environment variables can force mock opt-in even if caller passed False
+    env_allow_mock = os.environ.get("BINJA_MCP_ALLOW_MOCK", "").lower() in ("1", "true", "yes")
+    env_force_mock = os.environ.get("BINJA_MCP_FORCE_MOCK", "").lower() in ("1", "true", "yes")
+    if env_allow_mock or env_force_mock:
+        allow_mock = True
+
     try:
         import binaryninja  # type: ignore[import-not-found]
 
@@ -54,5 +64,7 @@ def import_binaryninja(allow_mock: bool = True):
 
 
 def is_mock_only() -> bool:
-    """Return True if BINJA_MCP_FORCE_MOCK is set (test/CI environments)."""
-    return os.environ.get("BINJA_MCP_FORCE_MOCK", "").lower() in ("1", "true", "yes")
+    """Return True if BINJA_MCP_FORCE_MOCK or BINJA_MCP_ALLOW_MOCK is set (test/CI environments)."""
+    env_force = os.environ.get("BINJA_MCP_FORCE_MOCK", "").lower() in ("1", "true", "yes")
+    env_allow = os.environ.get("BINJA_MCP_ALLOW_MOCK", "").lower() in ("1", "true", "yes")
+    return env_force or env_allow

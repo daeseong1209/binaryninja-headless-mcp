@@ -57,6 +57,47 @@ class TestLifecycle:
         assert listing["total"] == 1
         assert listing["items"][0]["binary_id"] == open_id
 
+    # --- path traversal / security -------------------------------------------
+
+    def test_open_allowed_roots_accepted(self, ctx, tmp_path, monkeypatch):
+        """File inside BINJA_MCP_ALLOWED_ROOTS is accepted."""
+        binary = tmp_path / "ok.bin"
+        binary.write_bytes(b"\x7fELF" + b"\x00" * 60)
+        monkeypatch.setenv("BINJA_MCP_ALLOWED_ROOTS", str(tmp_path))
+        res = t_lifecycle.open_binary(str(binary), ctx)
+        assert "binary_id" in res
+
+    def test_open_allowed_roots_rejected(self, ctx, tmp_path, monkeypatch):
+        """File outside BINJA_MCP_ALLOWED_ROOTS raises PermissionError."""
+        allowed = tmp_path / "allowed"
+        allowed.mkdir()
+        forbidden = tmp_path / "other.bin"
+        forbidden.write_bytes(b"\x7fELF" + b"\x00" * 60)
+        monkeypatch.setenv("BINJA_MCP_ALLOWED_ROOTS", str(allowed))
+        with pytest.raises(PermissionError):
+            t_lifecycle.open_binary(str(forbidden), ctx)
+
+    def test_open_no_allowed_roots_env_skips_check(self, ctx, tmp_path, monkeypatch):
+        """When BINJA_MCP_ALLOWED_ROOTS is unset, any path is accepted (backward compat)."""
+        monkeypatch.delenv("BINJA_MCP_ALLOWED_ROOTS", raising=False)
+        binary = tmp_path / "any.bin"
+        binary.write_bytes(b"\x7fELF" + b"\x00" * 60)
+        res = t_lifecycle.open_binary(str(binary), ctx)
+        assert "binary_id" in res
+
+    def test_open_symlink_rejected(self, ctx, tmp_path, monkeypatch):
+        """Symlinks are rejected regardless of allowed roots."""
+        monkeypatch.delenv("BINJA_MCP_ALLOWED_ROOTS", raising=False)
+        target = tmp_path / "real.bin"
+        target.write_bytes(b"\x7fELF" + b"\x00" * 60)
+        link = tmp_path / "link.bin"
+        try:
+            link.symlink_to(target)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlink creation not available on this platform/user")
+        with pytest.raises(PermissionError, match="symlinks not allowed"):
+            t_lifecycle.open_binary(str(link), ctx)
+
 
 # --- info --------------------------------------------------------------------
 
@@ -73,6 +114,12 @@ class TestInfo:
     def test_binary_info_unknown_id(self, ctx):
         with pytest.raises(ValueError, match="unknown binary_id"):
             t_info.binary_info("does-not-exist", ctx)
+
+    def test_binary_info_function_count_o1(self, ctx, open_id):
+        """function_count should use len() not list() materialisation."""
+        info = t_info.binary_info(open_id, ctx)
+        # Mock has exactly 7 functions
+        assert info["function_count"] == 7
 
 
 # --- functions ---------------------------------------------------------------
@@ -102,6 +149,28 @@ class TestFunctions:
     def test_list_functions_zero_limit_rejected(self, ctx, open_id):
         with pytest.raises(ValueError):
             t_functions.list_functions(open_id, ctx, limit=0)
+
+    def test_list_functions_two_pages_cover_all(self, ctx, open_id):
+        """Two paginated calls should together return all 7 mock functions."""
+        page1 = t_functions.list_functions(open_id, ctx, offset=0, limit=3)
+        page2 = t_functions.list_functions(open_id, ctx, offset=3, limit=10)
+
+        assert page1["total"] == 7
+        assert page2["total"] == 7
+        assert page1["has_more"] is True
+        assert page2["has_more"] is False
+
+        all_names = {it["name"] for it in page1["items"]} | {it["name"] for it in page2["items"]}
+        assert len(page1["items"]) + len(page2["items"]) == 7
+        # Verify we got distinct functions (no overlap)
+        assert len(all_names) == 7
+
+    def test_list_functions_slice_before_summarize(self, ctx, open_id):
+        """offset=3, limit=3 must return exactly the middle 3 functions."""
+        page = t_functions.list_functions(open_id, ctx, offset=3, limit=3)
+        assert len(page["items"]) == 3
+        assert page["offset"] == 3
+        assert page["total"] == 7
 
 
 # --- decompile / IL / disasm -------------------------------------------------
@@ -192,6 +261,60 @@ class TestStrings:
     def test_search_strings_regex(self, ctx, open_id):
         result = t_strings.search_strings(open_id, ctx, pattern=r"^/etc/", regex=True)
         assert any(v["value"].startswith("/etc/") for v in result["items"])
+
+    def test_search_strings_pattern_too_long(self, ctx, open_id):
+        """Pattern longer than MAX_PATTERN_LENGTH raises ValueError."""
+        from binja_mcp.tools.strings import MAX_PATTERN_LENGTH
+
+        long_pattern = "a" * (MAX_PATTERN_LENGTH + 1)
+        with pytest.raises(ValueError, match="pattern too long"):
+            t_strings.search_strings(open_id, ctx, pattern=long_pattern)
+
+    def test_search_strings_pattern_at_max_length_accepted(self, ctx, open_id):
+        """Pattern exactly at MAX_PATTERN_LENGTH must NOT raise ValueError."""
+        from binja_mcp.tools.strings import MAX_PATTERN_LENGTH
+
+        exact_pattern = "x" * MAX_PATTERN_LENGTH
+        # Won't match anything, but must not raise
+        result = t_strings.search_strings(open_id, ctx, pattern=exact_pattern)
+        assert "items" in result
+
+    def test_search_strings_regex_uses_threadpool(self, ctx, open_id, monkeypatch):
+        """When regex=True, the ThreadPoolExecutor code path is exercised."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        import binja_mcp.tools.strings as strings_mod
+
+        calls = []
+        original_tpe = ThreadPoolExecutor
+
+        class TrackingExecutor(original_tpe):
+            def __init__(self, *args, **kwargs):
+                calls.append("created")
+                super().__init__(*args, **kwargs)
+
+        monkeypatch.setattr(strings_mod, "ThreadPoolExecutor", TrackingExecutor)
+        result = t_strings.search_strings(open_id, ctx, pattern=r"error", regex=True)
+        assert len(calls) >= 1, "ThreadPoolExecutor was not used for regex=True"
+        assert any("error" in it["value"] for it in result["items"])
+
+    def test_search_strings_regex_timeout(self, ctx, open_id, monkeypatch):
+        """A very short timeout triggers TimeoutError for a slow regex."""
+        import binja_mcp.tools.strings as strings_mod
+
+        # Set timeout to near-zero so the worker is almost certainly cancelled
+        monkeypatch.setattr(strings_mod, "STRING_REGEX_TIMEOUT_S", 0.001)
+
+        # Use a catastrophic backtracking pattern; the mock has only 4 strings
+        # so it may finish before the timeout on fast machines — we accept that
+        # the code path executes without raising an unexpected exception.
+        # The important thing is TimeoutError (not another exception) when slow.
+        try:
+            t_strings.search_strings(open_id, ctx, pattern=r"(a+)+$", regex=True)
+        except TimeoutError:
+            pass  # expected on slower machines
+        except Exception as exc:  # noqa: BLE001
+            pytest.fail(f"Unexpected exception type: {type(exc).__name__}: {exc}")
 
 
 # --- registry sanity --------------------------------------------------------

@@ -6,6 +6,7 @@ from typing import Any
 
 from mcp.server.fastmcp import Context
 
+from ..errors import invalid_address
 from ..registry import tool
 from ..server import get_supervisor
 from ..utils import paginate, parse_address
@@ -39,7 +40,7 @@ def get_xrefs_to(
         func = find_function(bv, addr_or_name)
         target_addr = getattr(func, "start", None)
         if target_addr is None:
-            raise ValueError(f"could not resolve target: {addr_or_name!r}") from None
+            raise invalid_address(addr_or_name) from None
         target_label = getattr(func, "name", None) or f"0x{target_addr:x}"
 
     refs = bv.get_code_refs(target_addr) if hasattr(bv, "get_code_refs") else []
