@@ -1,0 +1,61 @@
+[project]
+name = "binja-mcp"
+version = "0.1.0"
+description = "Binary Ninja headless MCP server for Claude Code (OMC) and Codex CLI (OMX)"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [
+    { name = "binja-mcp contributors" },
+]
+keywords = ["binaryninja", "mcp", "reverse-engineering", "model-context-protocol"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: Software Development :: Disassemblers",
+]
+dependencies = [
+    "mcp[cli]>=1.0",
+]
+
+[project.optional-dependencies]
+binaryninja = []
+dev = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.21",
+    "pytest-cov>=4.1",
+    "ruff>=0.1",
+]
+
+[project.scripts]
+binja-mcp = "binja_mcp.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/your-org/binaryninja-headless-mcp"
+Issues = "https://github.com/your-org/binaryninja-headless-mcp/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/binja_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "live: tests that require a real Binary Ninja installation and license",
+]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
