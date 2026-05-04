@@ -279,42 +279,44 @@ class TestStrings:
         result = t_strings.search_strings(open_id, ctx, pattern=exact_pattern)
         assert "items" in result
 
-    def test_search_strings_regex_uses_threadpool(self, ctx, open_id, monkeypatch):
-        """When regex=True, the ThreadPoolExecutor code path is exercised."""
-        from concurrent.futures import ThreadPoolExecutor
-
+    def test_search_strings_regex_uses_timeout_helper(self, ctx, open_id, monkeypatch):
+        """When regex=True, the timeout-guarded code path is exercised."""
         import binja_mcp.tools.strings as strings_mod
 
         calls = []
-        original_tpe = ThreadPoolExecutor
+        original = strings_mod._collect_with_timeout
 
-        class TrackingExecutor(original_tpe):
-            def __init__(self, *args, **kwargs):
-                calls.append("created")
-                super().__init__(*args, **kwargs)
+        def tracked(raw, matcher, timeout):
+            calls.append("called")
+            return original(raw, matcher, timeout)
 
-        monkeypatch.setattr(strings_mod, "ThreadPoolExecutor", TrackingExecutor)
+        monkeypatch.setattr(strings_mod, "_collect_with_timeout", tracked)
         result = t_strings.search_strings(open_id, ctx, pattern=r"error", regex=True)
-        assert len(calls) >= 1, "ThreadPoolExecutor was not used for regex=True"
+        assert len(calls) >= 1, "_collect_with_timeout was not used for regex=True"
         assert any("error" in it["value"] for it in result["items"])
 
-    def test_search_strings_regex_timeout(self, ctx, open_id, monkeypatch):
-        """A very short timeout triggers TimeoutError for a slow regex."""
+    def test_search_strings_regex_rejects_nested_quantifier(self, ctx, open_id):
+        """Catastrophic-backtracking constructs are rejected before compile."""
+        with pytest.raises(ValueError, match="nested quantifier"):
+            t_strings.search_strings(open_id, ctx, pattern=r"(a+)+$", regex=True)
+        with pytest.raises(ValueError, match="nested quantifier"):
+            t_strings.search_strings(open_id, ctx, pattern=r"(a*)*", regex=True)
+
+    def test_search_strings_regex_timeout_helper_raises(self, ctx, open_id, monkeypatch):
+        """The daemon-thread watchdog raises TimeoutError when wait expires."""
         import binja_mcp.tools.strings as strings_mod
 
-        # Set timeout to near-zero so the worker is almost certainly cancelled
         monkeypatch.setattr(strings_mod, "STRING_REGEX_TIMEOUT_S", 0.001)
 
-        # Use a catastrophic backtracking pattern; the mock has only 4 strings
-        # so it may finish before the timeout on fast machines — we accept that
-        # the code path executes without raising an unexpected exception.
-        # The important thing is TimeoutError (not another exception) when slow.
-        try:
-            t_strings.search_strings(open_id, ctx, pattern=r"(a+)+$", regex=True)
-        except TimeoutError:
-            pass  # expected on slower machines
-        except Exception as exc:  # noqa: BLE001
-            pytest.fail(f"Unexpected exception type: {type(exc).__name__}: {exc}")
+        def slow_collect(raw, matcher):
+            import time as _time
+
+            _time.sleep(1.0)
+            return []
+
+        monkeypatch.setattr(strings_mod, "_collect", slow_collect)
+        with pytest.raises(TimeoutError, match="regex match exceeded"):
+            t_strings.search_strings(open_id, ctx, pattern="anything", regex=True)
 
 
 # --- registry sanity --------------------------------------------------------
