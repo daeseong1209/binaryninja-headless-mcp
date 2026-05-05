@@ -6,12 +6,85 @@ backend so individual tool functions stay short.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import Any
 
 from ..errors import binary_not_found, function_not_found, invalid_il_level, symbol_not_found
 from ..session import Session
 from ..supervisor import BinaryNotFoundError, Supervisor
 from ..utils import parse_address
+
+_SYMBOL_TYPE_FILTERS: dict[str, tuple[str, ...]] = {
+    "function": ("FunctionSymbol",),
+    "imported_function": ("ImportedFunctionSymbol",),
+    "import_address": ("ImportAddressSymbol",),
+    "imports": ("ImportedFunctionSymbol", "ImportAddressSymbol"),
+    "data": ("DataSymbol",),
+    "external": ("ExternalSymbol",),
+    "library_function": ("LibraryFunctionSymbol",),
+}
+
+
+def resolve_symbol_types(filter_name: str) -> tuple[Any, ...]:
+    """Resolve a symbol-type filter string to backend-appropriate enum values.
+
+    Prefers real ``binaryninja.SymbolType`` enum objects; falls back to the
+    ``MockSymbolType`` IntEnum (whose integer values match real BN exactly).
+    Raises ValueError for unknown filter names.
+    """
+    name = filter_name.lower().replace("-", "_")
+    enum_names = _SYMBOL_TYPE_FILTERS.get(name)
+    if enum_names is None:
+        raise ValueError(
+            f"unknown symbol_type: {name!r}; valid: {sorted(_SYMBOL_TYPE_FILTERS.keys())}"
+        )
+    try:
+        from binaryninja import SymbolType  # type: ignore[import]
+
+        return tuple(getattr(SymbolType, n) for n in enum_names if hasattr(SymbolType, n))
+    except ImportError:
+        from ..mock_backend import MockSymbolType
+
+        return tuple(
+            getattr(MockSymbolType, n) for n in enum_names if hasattr(MockSymbolType, n)
+        )
+
+
+def symbol_to_dict(s: Any) -> dict[str, Any]:
+    """Convert a Symbol-like object into a JSON-friendly dict.
+
+    Used by both list_symbols (symbols.py) and list_imports/list_exports
+    (sections.py). Tolerates missing attributes from either backend.
+    """
+    sym_type = getattr(s, "type", None)
+    return {
+        "name": getattr(s, "name", "<unnamed>"),
+        "full_name": getattr(s, "full_name", "") or "",
+        "address": hex_or_none(getattr(s, "address", None)),
+        "type": getattr(sym_type, "name", str(sym_type)) if sym_type is not None else None,
+        "auto": bool(getattr(s, "auto", True)),
+        "ordinal": int(getattr(s, "ordinal", 0) or 0),
+    }
+
+
+@contextmanager
+def undo_transaction(bv: Any):
+    """Wrap a write block in a Binary Ninja undo group.
+
+    On entry, calls ``bv.begin_undo_actions()`` and yields the resulting
+    state_id (or None if the backend does not expose the API). On exit,
+    best-effort calls ``bv.commit_undo_actions(state_id)`` so any exception
+    raised inside the block is preserved.
+    """
+    state_id = bv.begin_undo_actions() if hasattr(bv, "begin_undo_actions") else None
+    try:
+        yield state_id
+    finally:
+        if state_id is not None and hasattr(bv, "commit_undo_actions"):
+            try:
+                bv.commit_undo_actions(state_id)
+            except Exception:
+                pass  # best-effort; don't mask the original error
 
 
 def get_session(supervisor: Supervisor, binary_id: str) -> Session:

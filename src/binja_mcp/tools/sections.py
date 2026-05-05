@@ -9,7 +9,7 @@ from mcp.server.fastmcp import Context
 from ..registry import tool
 from ..server import get_supervisor
 from ..utils import paginate
-from ._helpers import get_session, hex_or_none
+from ._helpers import get_session, hex_or_none, resolve_symbol_types, symbol_to_dict
 
 
 @tool()
@@ -66,7 +66,7 @@ def list_imports(
     sup = get_supervisor(ctx)
     session = get_session(sup, binary_id)
     bv = session.bv
-    items = _symbols_to_dicts(_collect_imports(bv))
+    items = [symbol_to_dict(s) for s in _collect_imports(bv)]
     return paginate(items, offset=offset, limit=limit)
 
 
@@ -84,7 +84,7 @@ def list_exports(
     sup = get_supervisor(ctx)
     session = get_session(sup, binary_id)
     bv = session.bv
-    items = _symbols_to_dicts(_collect_exports(bv))
+    items = [symbol_to_dict(s) for s in _collect_exports(bv)]
     return paginate(items, offset=offset, limit=limit)
 
 
@@ -93,42 +93,12 @@ def list_exports(
 # ---------------------------------------------------------------------------
 
 
-def _import_type_values(bv: Any) -> list[Any]:
-    """Return import-related SymbolType values appropriate for *bv*'s backend.
-
-    Prefers real binaryninja enum objects; falls back to MockSymbolType ints.
-    """
-    try:
-        import binaryninja  # type: ignore[import]
-
-        return [
-            binaryninja.SymbolType.ImportedFunctionSymbol,
-            binaryninja.SymbolType.ImportAddressSymbol,
-        ]
-    except Exception:
-        from ..mock_backend import MockSymbolType
-
-        return [
-            MockSymbolType.ImportedFunctionSymbol,
-            MockSymbolType.ImportAddressSymbol,
-        ]
-
-
 def _collect_imports(bv: Any) -> list[Any]:
     """Collect imported function/address symbols from any BinaryView backend."""
-    types = _import_type_values(bv)
-    getter = getattr(bv, "get_symbols_of_type", None)
-    if getter is not None:
-        result: list[Any] = []
-        for t in types:
-            result.extend(getter(t))
-        return result
-    # Fallback: filter all symbols by integer type comparison
-    type_ints = {int(t) for t in types}
-    all_syms = getattr(bv, "symbols", []) or []
-    if hasattr(all_syms, "values"):
-        all_syms = list(all_syms.values())
-    return [s for s in all_syms if int(getattr(s, "type", -1)) in type_ints]
+    result: list[Any] = []
+    for t in resolve_symbol_types("imports"):
+        result.extend(bv.get_symbols_of_type(t))
+    return result
 
 
 def _collect_exports(bv: Any) -> list[Any]:
@@ -139,16 +109,8 @@ def _collect_exports(bv: Any) -> list[Any]:
     meaning BN assigned the name from the binary's export table rather than by
     analysis.  On the mock backend we use the explicit ``is_export=True`` flag.
     """
-    all_syms: list[Any] = []
-    getter = getattr(bv, "get_symbols", None)
-    if getter is not None:
-        all_syms = list(getter())
-    else:
-        raw = getattr(bv, "symbols", []) or []
-        all_syms = list(raw.values()) if hasattr(raw, "values") else list(raw)
-
     out: list[Any] = []
-    for s in all_syms:
+    for s in bv.get_symbols():
         # Mock backend path: explicit export marker
         if getattr(s, "is_export", False):
             out.append(s)
@@ -160,20 +122,3 @@ def _collect_exports(bv: Any) -> list[Any]:
         if is_func and not is_auto:
             out.append(s)
     return out
-
-
-def _symbols_to_dicts(syms: list[Any]) -> list[dict[str, Any]]:
-    """Convert symbol objects into JSON-friendly dicts."""
-    result = []
-    for sym in syms:
-        sym_type = getattr(sym, "type", None)
-        result.append(
-            {
-                "name": getattr(sym, "name", None),
-                "address": hex_or_none(getattr(sym, "address", None)),
-                "type": str(sym_type) if sym_type is not None else None,
-                "full_name": getattr(sym, "full_name", None),
-                "ordinal": getattr(sym, "ordinal", None),
-            }
-        )
-    return result

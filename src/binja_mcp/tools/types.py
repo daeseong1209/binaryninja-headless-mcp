@@ -10,7 +10,7 @@ from ..errors import invalid_address, type_parse_error
 from ..registry import tool
 from ..server import get_supervisor
 from ..utils import parse_address
-from ._helpers import get_session, hex_or_none
+from ._helpers import get_session, hex_or_none, undo_transaction
 
 
 @tool()
@@ -33,28 +33,15 @@ def define_data_var(binary_id: str, addr: str, type_str: str, ctx: Context) -> d
         raise ValueError("type_str must be a non-empty string")
 
     try:
-        parsed = bv.parse_type_string(type_str) if hasattr(bv, "parse_type_string") else None
+        parsed = bv.parse_type_string(type_str)
     except Exception as exc:
         raise type_parse_error(type_str, str(exc)) from exc
 
-    if parsed is None:
-        raise type_parse_error(type_str, "no parse method on backend")
-
     type_obj = parsed[0] if isinstance(parsed, tuple) else parsed
 
-    if not hasattr(bv, "define_user_data_var"):
-        raise RuntimeError("backend does not support data variable definitions")
-
     # Wrap in an explicit undo transaction so real BN records a roll-backable entry.
-    state_id = bv.begin_undo_actions() if hasattr(bv, "begin_undo_actions") else None
-    try:
+    with undo_transaction(bv):
         bv.define_user_data_var(address, type_obj)
-    finally:
-        if state_id is not None and hasattr(bv, "commit_undo_actions"):
-            try:
-                bv.commit_undo_actions(state_id)
-            except Exception:
-                pass  # best-effort; don't mask the original error
 
     return {
         "address": hex_or_none(address),
@@ -137,19 +124,9 @@ def define_type(binary_id: str, name: str, source: str, ctx: Context) -> dict[st
             f"name {name!r} not in parsed types {sorted(types_map.keys())}",
         )
 
-    if not hasattr(bv, "define_user_type"):
-        raise RuntimeError("backend does not support type definitions")
-
     # Wrap in an explicit undo transaction so real BN records a roll-backable entry.
-    state_id = bv.begin_undo_actions() if hasattr(bv, "begin_undo_actions") else None
-    try:
+    with undo_transaction(bv):
         bv.define_user_type(name, type_obj)
-    finally:
-        if state_id is not None and hasattr(bv, "commit_undo_actions"):
-            try:
-                bv.commit_undo_actions(state_id)
-            except Exception:
-                pass  # best-effort; don't mask the original error
 
     return {
         "name": name,
