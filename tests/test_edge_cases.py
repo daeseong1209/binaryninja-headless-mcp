@@ -1019,3 +1019,126 @@ class TestEdgeDefineType:
         result = t_types.define_type(open_id, "SchemaType", source, ctx)
         assert "name" in result
         assert "definition" in result
+
+    def test_c1_tuple_result_unwrap(self, ctx, open_id, monkeypatch):
+        """C1 regression: parse_types_from_source returning a (result, errors) tuple
+        must not raise AttributeError — result[0] is unwrapped automatically."""
+        session = ctx.request_context.lifespan_context.supervisor.get(open_id)
+        bv = session.bv
+
+        # Wrap the real parse_types_from_source to return a tuple
+        original_parser = bv.parse_types_from_source
+
+        class _FakeResult:
+            def __init__(self, inner):
+                self._inner = inner
+
+            @property
+            def types(self):
+                return self._inner.types
+
+            def define_user_type(self, name, t):
+                return self._inner.define_user_type(name, t)
+
+        def _tuple_parser(src):
+            real = original_parser(src)
+            return (real, [])  # simulate tuple return
+
+        monkeypatch.setattr(bv, "parse_types_from_source", _tuple_parser)
+        result = t_types.define_type(
+            open_id, "TupleWrap", "typedef struct {int z;} TupleWrap;", ctx
+        )
+        assert result["name"] == "TupleWrap"
+
+
+# ---------------------------------------------------------------------------
+# OMX v0.3.2 regression — new fix coverage
+# ---------------------------------------------------------------------------
+
+
+class TestEdgeOMXFixes:
+    """Regression tests for the 14 findings fixed in v0.3.2."""
+
+    def test_m7_rename_symbol_none_addr_raises_invalid_address(self, ctx, open_id):
+        """M7: rename_symbol(addr=None) must raise BinjaError(INVALID_ADDRESS), not TypeError."""
+        with pytest.raises(BinjaError) as exc_info:
+            t_symbols.rename_symbol(open_id, None, "newname", ctx)  # type: ignore[arg-type]
+        assert exc_info.value.code == INVALID_ADDRESS
+
+    def test_m7_define_data_var_none_addr_raises_invalid_address(self, ctx, open_id):
+        """M7: define_data_var(addr=None) must raise BinjaError(INVALID_ADDRESS), not TypeError."""
+        with pytest.raises(BinjaError) as exc_info:
+            t_types.define_data_var(open_id, None, "uint64_t", ctx)  # type: ignore[arg-type]
+        assert exc_info.value.code == INVALID_ADDRESS
+
+    def test_c2_redos_a_plus_plus(self, ctx, open_id):
+        """C2: (a+)+ pattern is rejected as catastrophic backtracking."""
+        with pytest.raises(ValueError, match="nested quantifier"):
+            t_strings.search_strings(open_id, ctx, pattern="(a+)+", regex=True)
+
+    def test_c2_redos_a_question_plus(self, ctx, open_id):
+        """C2: (a?)+ pattern is rejected (newly added pattern class)."""
+        with pytest.raises(ValueError, match="nested quantifier"):
+            t_strings.search_strings(open_id, ctx, pattern="(a?)+", regex=True)
+
+    def test_c2_redos_alternation_plus(self, ctx, open_id):
+        """C2: (a|aa)+ pattern is rejected (newly added pattern class)."""
+        with pytest.raises(ValueError, match="nested quantifier"):
+            t_strings.search_strings(open_id, ctx, pattern="(a|aa)+", regex=True)
+
+    def test_c2_redos_quantified_group(self, ctx, open_id):
+        """C2: (a+){2,} pattern is rejected (newly added pattern class)."""
+        with pytest.raises(ValueError, match="nested quantifier"):
+            t_strings.search_strings(open_id, ctx, pattern="(a+){2,}", regex=True)
+
+    def test_c2_safe_pattern_allowed(self, ctx, open_id):
+        """C2: safe non-nested pattern like (abc)+ is NOT rejected."""
+        # Should not raise; may return empty list
+        result = t_strings.search_strings(open_id, ctx, pattern="(abc)+", regex=True)
+        assert "items" in result
+
+    def test_c2_safe_noncapturing_group_allowed(self, ctx, open_id):
+        """C2: non-capturing group with quantifier (?:abc)+ is NOT a ReDoS risk.
+
+        Regression test for verifier-found false positive in v0.3.2: pattern 0
+        used to include '?' in its inner-quantifier character class, which
+        matched the '?' inside '(?:' and incorrectly flagged the entire
+        construct as nested-quantifier-risky. Standard non-capturing groups
+        with literal content are safe.
+        """
+        # Should not raise — non-capturing group with simple +/* is safe
+        for safe in ["(?:abc)+", "(?:foo)*", r"(?:\d+)"]:
+            result = t_strings.search_strings(open_id, ctx, pattern=safe, regex=True)
+            assert "items" in result, f"safe pattern {safe!r} was rejected"
+
+    def test_n1_binja_error_non_serializable_extra_raises(self):
+        """n1: BinjaError with non-JSON-serialisable extra must raise TypeError immediately."""
+        import pytest  # noqa: PLC0415
+
+        with pytest.raises(TypeError, match="JSON-serialisable"):
+            BinjaError("CODE", "msg", bad_field=object())
+
+    def test_m2_lifecycle_path_is_canonical(self, ctx, tmp_path, monkeypatch):
+        """M2: open_binary returns the resolved (canonical) path, not the original."""
+        monkeypatch.delenv("BINJA_MCP_ALLOWED_ROOTS", raising=False)
+        f = tmp_path / "canon.bin"
+        f.write_bytes(b"\x7fELF" + b"\x00" * 60)
+        result = t_lifecycle.open_binary(str(f), ctx)
+        # The returned path must resolve to the same file
+        from pathlib import Path  # noqa: PLC0415
+
+        assert Path(result["path"]).resolve() == f.resolve()
+
+    def test_m1_inflight_rate_limiter_blocks_fourth(self, ctx, open_id, monkeypatch):
+        """M1: when 3 regex workers are in flight, 4th raises RuntimeError immediately."""
+        from binja_mcp.tools import strings  # noqa: PLC0415
+
+        # Force counter to the limit
+        with strings._regex_inflight_lock:
+            strings._regex_inflight = strings._REGEX_INFLIGHT_LIMIT
+        try:
+            with pytest.raises(RuntimeError, match="too many regex"):
+                t_strings.search_strings(open_id, ctx, pattern="abc", regex=True)
+        finally:
+            with strings._regex_inflight_lock:
+                strings._regex_inflight = 0

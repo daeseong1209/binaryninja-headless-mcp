@@ -15,6 +15,12 @@ class BinjaError(ValueError):
     def __init__(self, code: str, message: str, **extra: Any):
         super().__init__(message)
         self.code = code
+        # Validate extras are JSON-serialisable to prevent response shape drift
+        import json
+        try:
+            json.dumps(extra)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(f"BinjaError extra fields must be JSON-serialisable: {exc}") from exc
         self.extra = extra
 
     def to_dict(self) -> dict[str, Any]:
