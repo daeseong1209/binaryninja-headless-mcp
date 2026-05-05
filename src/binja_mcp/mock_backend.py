@@ -13,13 +13,47 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
+from enum import IntEnum
 from pathlib import Path
+
+
+class MockSymbolType(IntEnum):
+    FunctionSymbol = 0
+    ImportAddressSymbol = 1
+    ImportedFunctionSymbol = 2
+    DataSymbol = 3
+    ImportedDataSymbol = 4
+    ExternalSymbol = 5
+    LibraryFunctionSymbol = 6
 
 
 @dataclass
 class MockSymbol:
     name: str
     address: int
+    type: MockSymbolType = MockSymbolType.FunctionSymbol
+    full_name: str = ""
+    ordinal: int = 0
+    is_export: bool = False
+
+
+@dataclass
+class MockSegment:
+    start: int
+    end: int
+    data_offset: int = 0
+    data_length: int = 0
+    readable: bool = True
+    writable: bool = False
+    executable: bool = True
+
+
+@dataclass
+class MockSection:
+    name: str
+    start: int
+    end: int
+    semantics: str = "CodeSectionSemantics"
 
 
 @dataclass
@@ -84,6 +118,8 @@ class MockBinaryView:
     functions: list[MockFunction] = field(default_factory=list)
     strings: list[MockString] = field(default_factory=list)
     symbols: list[MockSymbol] = field(default_factory=list)
+    segments: list[MockSegment] = field(default_factory=list)
+    sections: dict[str, MockSection] = field(default_factory=dict)
     _xrefs_to: dict[int, list[MockReference]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -125,8 +161,98 @@ class MockBinaryView:
                 MockString(value="binja-mcp", address=base + 0x560),
             ]
         )
+        # Segments: .text (rx) and .data (rw)
+        text_start = base
+        text_end = base + 0x300
+        data_start = base + 0x400
+        data_end = base + 0x600
+        self.segments.extend(
+            [
+                MockSegment(
+                    start=text_start,
+                    end=text_end,
+                    data_offset=0,
+                    data_length=text_end - text_start,
+                    readable=True,
+                    writable=False,
+                    executable=True,
+                ),
+                MockSegment(
+                    start=data_start,
+                    end=data_end,
+                    data_offset=text_end - text_start,
+                    data_length=data_end - data_start,
+                    readable=True,
+                    writable=True,
+                    executable=False,
+                ),
+            ]
+        )
+        # Sections: .text, .data, .rodata
+        self.sections = {
+            ".text": MockSection(
+                name=".text",
+                start=text_start,
+                end=text_end,
+                semantics="CodeSectionSemantics",
+            ),
+            ".data": MockSection(
+                name=".data",
+                start=data_start,
+                end=data_end,
+                semantics="ReadWriteDataSectionSemantics",
+            ),
+            ".rodata": MockSection(
+                name=".rodata",
+                start=base + 0x500,
+                end=base + 0x580,
+                semantics="ReadOnlyDataSectionSemantics",
+            ),
+        }
+        # Extra symbols for list_imports/exports tests
+        self.symbols.append(
+            MockSymbol(
+                name="printf",
+                address=base + 0x800,
+                type=MockSymbolType.ImportedFunctionSymbol,
+                full_name="printf",
+            )
+        )
+        self.symbols.append(
+            MockSymbol(
+                name="malloc",
+                address=base + 0x810,
+                type=MockSymbolType.ImportAddressSymbol,
+                full_name="malloc",
+            )
+        )
+        self.symbols.append(
+            MockSymbol(
+                name="global_var",
+                address=base + 0x820,
+                type=MockSymbolType.DataSymbol,
+                full_name="global_var",
+            )
+        )
+        # exported_func: FunctionSymbol with is_export=True (real BN has no
+        # ExportedFunctionSymbol; we track exports via is_export flag in mock)
+        self.symbols.append(
+            MockSymbol(
+                name="exported_func",
+                address=base + 0x830,
+                type=MockSymbolType.FunctionSymbol,
+                full_name="exported_func",
+                is_export=True,
+            )
+        )
 
     # API surface used by tools ------------------------------------------------
+
+    def get_symbols(self) -> list[MockSymbol]:
+        return list(self.symbols)
+
+    def get_symbols_of_type(self, sym_type: int) -> list[MockSymbol]:
+        return [s for s in self.symbols if int(s.type) == int(sym_type)]
 
     def get_function_at(self, addr: int) -> MockFunction | None:
         for f in self.functions:

@@ -58,6 +58,45 @@ disassembled starting there.
 Code references that point at a given function or address. Items contain
 `{"address", "function"}`.
 
+## Memory Layout
+
+### `list_segments(binary_id)`
+List all memory segments defined in the binary.
+```json
+{
+  "items": [{"start": "0x...", "end": "0x...", "data_offset": N, "data_length": N,
+             "readable": true, "writable": false, "executable": true}],
+  "total": N
+}
+```
+
+### `list_sections(binary_id)`
+List all named sections (e.g. `.text`, `.data`, `.rodata`).
+```json
+{
+  "items": [{"name": ".text", "start": "0x...", "end": "0x...", "semantics": "CodeSectionSemantics"}],
+  "total": N
+}
+```
+
+### `list_imports(binary_id, offset=0, limit=100)`
+List imported symbols (paginated). Returns `ImportedFunctionSymbol` and `ImportAddressSymbol` entries.
+```json
+{
+  "items": [{"name": "printf", "address": "0x...", "type": "...", "full_name": "printf", "ordinal": null}],
+  "offset": 0, "limit": 100, "total": N, "has_more": false
+}
+```
+
+### `list_exports(binary_id, offset=0, limit=100)`
+List exported symbols (paginated). Returns `ExportedFunctionSymbol` entries.
+```json
+{
+  "items": [{"name": "DllMain", "address": "0x...", "type": "...", "full_name": "DllMain", "ordinal": null}],
+  "offset": 0, "limit": 100, "total": N, "has_more": false
+}
+```
+
 ## Strings
 
 ### `search_strings(binary_id, pattern=None, regex=False, case_sensitive=True, offset=0, limit=100)`
@@ -81,6 +120,8 @@ Search strings discovered by Binary Ninja's analysis.
 | any | Function not found by name/address | `ValueError("function not found: ...")` |
 | `get_il` / `decompile` | Invalid IL level | `ValueError("unknown IL level: ...")` |
 | `list_functions` | `offset` < 0 or `limit` ≤ 0 | `ValueError` |
+| `list_imports` | `offset` < 0 or `limit` ≤ 0 | `ValueError` |
+| `list_exports` | `offset` < 0 or `limit` ≤ 0 | `ValueError` |
 | `search_strings` | `pattern` exceeds 256 characters | `ValueError("pattern too long (max 256)")` |
 | `search_strings` | Regex evaluation exceeds 2 s | `TimeoutError("regex match exceeded 2.0s")` |
 

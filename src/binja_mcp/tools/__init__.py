@@ -9,6 +9,7 @@ from . import (
     functions,  # noqa: F401
     info,  # noqa: F401
     lifecycle,  # noqa: F401
+    sections,  # noqa: F401
     strings,  # noqa: F401
     xrefs,  # noqa: F401
 )

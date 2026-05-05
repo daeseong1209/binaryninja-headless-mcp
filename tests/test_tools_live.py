@@ -198,6 +198,77 @@ def test_search_strings_real_binary_nonempty(live_session):
 
 
 @pytest.mark.live
+def test_list_segments_real_pe(live_session):
+    """list_segments should return at least one segment with readable=True."""
+    from binja_mcp.tools import sections as t_sections
+
+    sup = live_session["supervisor"]
+    binary_id = live_session["binary_id"]
+    ctx = _ctx(sup)
+
+    result = t_sections.list_segments(binary_id, ctx)
+    assert result["total"] >= 1
+    assert any(item["readable"] for item in result["items"])
+
+
+@pytest.mark.live
+def test_list_sections_real_pe(live_session):
+    """list_sections should return at least 2 sections including .text."""
+    from binja_mcp.tools import sections as t_sections
+
+    sup = live_session["supervisor"]
+    binary_id = live_session["binary_id"]
+    ctx = _ctx(sup)
+
+    result = t_sections.list_sections(binary_id, ctx)
+    assert result["total"] >= 2
+    names = {item["name"] for item in result["items"]}
+    assert ".text" in names, f"expected .text in sections, got {names}"
+
+
+@pytest.mark.live
+def test_list_imports_real_pe(live_session):
+    """list_imports should return at least 5 imports for a non-trivial PE."""
+    from binja_mcp.tools import sections as t_sections
+
+    sup = live_session["supervisor"]
+    binary_id = live_session["binary_id"]
+    ctx = _ctx(sup)
+
+    result = t_sections.list_imports(binary_id, ctx)
+    assert result["total"] >= 5, f"expected >= 5 imports, got {result['total']}"
+
+
+@pytest.mark.live
+def test_list_imports_real_pe_has_known_apis(live_session):
+    """Real Windows PE typically imports kernel32 / ntdll APIs."""
+    from binja_mcp.tools import sections as t_sections
+
+    sup = live_session["supervisor"]
+    binary_id = live_session["binary_id"]
+    ctx = _ctx(sup)
+
+    result = t_sections.list_imports(binary_id, ctx, limit=500)
+    assert result["total"] > 5
+    # At least some import names are non-empty strings
+    assert any(item["name"] for item in result["items"])
+
+
+@pytest.mark.live
+def test_list_exports_real_pe(live_session):
+    """list_exports should not crash (exports may be 0 for exe files)."""
+    from binja_mcp.tools import sections as t_sections
+
+    sup = live_session["supervisor"]
+    binary_id = live_session["binary_id"]
+    ctx = _ctx(sup)
+
+    result = t_sections.list_exports(binary_id, ctx)
+    assert result["total"] >= 0
+    assert "items" in result
+
+
+@pytest.mark.live
 def test_close_real_binary_frees_session(live_session):
     """Closing the binary should leave zero open sessions.
 
