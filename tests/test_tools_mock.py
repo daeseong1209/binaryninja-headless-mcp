@@ -14,6 +14,7 @@ from binja_mcp.tools import decompile as t_decompile
 from binja_mcp.tools import functions as t_functions
 from binja_mcp.tools import info as t_info
 from binja_mcp.tools import lifecycle as t_lifecycle
+from binja_mcp.tools import sections as t_sections
 from binja_mcp.tools import strings as t_strings
 from binja_mcp.tools import xrefs as t_xrefs
 
@@ -319,6 +320,127 @@ class TestStrings:
             t_strings.search_strings(open_id, ctx, pattern="anything", regex=True)
 
 
+# --- sections / segments / imports / exports --------------------------------
+
+
+class TestSections:
+    def test_list_segments_nonempty(self, ctx, open_id):
+        result = t_sections.list_segments(open_id, ctx)
+        assert result["total"] > 0
+        assert len(result["items"]) == result["total"]
+
+    def test_list_segments_item_keys(self, ctx, open_id):
+        result = t_sections.list_segments(open_id, ctx)
+        for item in result["items"]:
+            assert item["start"].startswith("0x")
+            assert item["end"].startswith("0x")
+            assert isinstance(item["readable"], bool)
+            assert isinstance(item["writable"], bool)
+            assert isinstance(item["executable"], bool)
+
+    def test_list_segments_has_executable_segment(self, ctx, open_id):
+        result = t_sections.list_segments(open_id, ctx)
+        assert any(item["executable"] for item in result["items"])
+
+    def test_list_sections_nonempty(self, ctx, open_id):
+        result = t_sections.list_sections(open_id, ctx)
+        assert result["total"] > 0
+
+    def test_list_sections_contains_text_and_data(self, ctx, open_id):
+        result = t_sections.list_sections(open_id, ctx)
+        names = {item["name"] for item in result["items"]}
+        assert ".text" in names
+        assert ".data" in names
+
+    def test_list_sections_item_keys(self, ctx, open_id):
+        result = t_sections.list_sections(open_id, ctx)
+        for item in result["items"]:
+            assert "name" in item
+            assert item["start"].startswith("0x")
+            assert item["end"].startswith("0x")
+            assert "semantics" in item
+
+    def test_list_imports_has_items(self, ctx, open_id):
+        result = t_sections.list_imports(open_id, ctx)
+        assert result["total"] >= 1
+        assert len(result["items"]) >= 1
+
+    def test_list_imports_returns_imports_not_exports(self, ctx, open_id):
+        """list_imports must return ImportedFunctionSymbol/ImportAddressSymbol entries."""
+        result = t_sections.list_imports(open_id, ctx)
+        names = {it["name"] for it in result["items"]}
+        # mock has 'printf' (ImportedFunctionSymbol) and 'malloc' (ImportAddressSymbol)
+        assert "printf" in names or "malloc" in names, (
+            f"expected import names not found: {names}"
+        )
+        # export-marked symbol must not leak into imports
+        assert "exported_func" not in names
+
+    def test_list_imports_pagination_structure(self, ctx, open_id):
+        result = t_sections.list_imports(open_id, ctx, offset=0, limit=1)
+        assert "offset" in result
+        assert "limit" in result
+        assert "has_more" in result
+        assert result["limit"] == 1
+
+    def test_list_imports_offset_equals_total_returns_empty(self, ctx, open_id):
+        total = t_sections.list_imports(open_id, ctx)["total"]
+        result = t_sections.list_imports(open_id, ctx, offset=total)
+        assert result["items"] == []
+        assert result["has_more"] is False
+
+    def test_list_imports_negative_offset_rejected(self, ctx, open_id):
+        with pytest.raises(ValueError):
+            t_sections.list_imports(open_id, ctx, offset=-1)
+
+    def test_list_imports_zero_limit_rejected(self, ctx, open_id):
+        with pytest.raises(ValueError):
+            t_sections.list_imports(open_id, ctx, limit=0)
+
+    def test_list_exports_has_items(self, ctx, open_id):
+        result = t_sections.list_exports(open_id, ctx)
+        assert result["total"] >= 1
+
+    def test_list_exports_returns_exports_not_imports(self, ctx, open_id):
+        """list_exports must return export-marked entries, not import symbols."""
+        result = t_sections.list_exports(open_id, ctx)
+        names = {it["name"] for it in result["items"]}
+        # mock marks 'exported_func' with is_export=True
+        assert "exported_func" in names or any("export" in n.lower() for n in names), (
+            f"expected export names not found: {names}"
+        )
+        # imports must not leak into exports
+        assert "printf" not in names, f"import 'printf' leaked into exports: {names}"
+        assert "malloc" not in names, f"import 'malloc' leaked into exports: {names}"
+
+    def test_list_exports_offset_equals_total_returns_empty(self, ctx, open_id):
+        total = t_sections.list_exports(open_id, ctx)["total"]
+        result = t_sections.list_exports(open_id, ctx, offset=total)
+        assert result["items"] == []
+        assert result["has_more"] is False
+
+    def test_list_exports_negative_offset_rejected(self, ctx, open_id):
+        with pytest.raises(ValueError):
+            t_sections.list_exports(open_id, ctx, offset=-1)
+
+    def test_list_exports_zero_limit_rejected(self, ctx, open_id):
+        with pytest.raises(ValueError):
+            t_sections.list_exports(open_id, ctx, limit=0)
+
+    def test_list_segments_empty_bv(self, ctx, fixture_binary):
+        """BinaryView with no segments returns total=0."""
+        res = t_lifecycle.open_binary(str(fixture_binary), ctx)
+        bid = res["binary_id"]
+        # Monkeypatch the bv segments to empty
+        from binja_mcp.supervisor import Supervisor
+
+        sup: Supervisor = ctx.request_context.lifespan_context.supervisor
+        sup.get(bid).bv.segments = []
+        result = t_sections.list_segments(bid, ctx)
+        assert result["total"] == 0
+        assert result["items"] == []
+
+
 # --- registry sanity --------------------------------------------------------
 
 
@@ -337,5 +459,9 @@ def test_registry_contains_all_core_tools():
         "get_disasm",
         "get_xrefs_to",
         "search_strings",
+        "list_segments",
+        "list_sections",
+        "list_imports",
+        "list_exports",
     }
     assert expected.issubset(names), f"missing: {expected - names}"
