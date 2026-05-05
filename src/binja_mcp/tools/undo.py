@@ -17,6 +17,8 @@ def undo(binary_id: str, ctx: Context) -> dict[str, Any]:
     """Roll back the most recent undo group on the binary.
 
     No-op (returns ``{"undone": False}``) if the undo stack is empty.
+    On real BN where the undo stack is not exposed, ``remaining`` is None
+    and ``undone`` reflects whether the call completed without error.
     """
     sup = get_supervisor(ctx)
     session = get_session(sup, binary_id)
@@ -24,18 +26,35 @@ def undo(binary_id: str, ctx: Context) -> dict[str, Any]:
     before = _stack_depth(bv, "_undo_stack")
     bv.undo()
     after = _stack_depth(bv, "_undo_stack")
+    if before is None or after is None:
+        # Real BN: stack not exposed; we cannot tell if anything actually changed
+        return {
+            "undone": None,
+            "remaining": None,
+            "note": "real BN does not expose undo stack depth",
+        }
     return {"undone": after < before, "remaining": after}
 
 
 @tool()
 def redo(binary_id: str, ctx: Context) -> dict[str, Any]:
-    """Re-apply the most recently undone group."""
+    """Re-apply the most recently undone group.
+
+    On real BN where the redo stack is not exposed, ``remaining`` is None.
+    """
     sup = get_supervisor(ctx)
     session = get_session(sup, binary_id)
     bv = session.bv
     before = _stack_depth(bv, "_redo_stack")
     bv.redo()
     after = _stack_depth(bv, "_redo_stack")
+    if before is None or after is None:
+        # Real BN: stack not exposed; we cannot tell if anything actually changed
+        return {
+            "redone": None,
+            "remaining": None,
+            "note": "real BN does not expose redo stack depth",
+        }
     return {"redone": after < before, "remaining": after}
 
 
@@ -62,6 +81,7 @@ def commit_undo(binary_id: str, state_id: str, ctx: Context) -> dict[str, Any]:
     return {"committed": state_id}
 
 
-def _stack_depth(bv: Any, attr: str) -> int:
+def _stack_depth(bv: Any, attr: str) -> int | None:
+    """Return the depth of an undo/redo stack, or None if not exposed by backend."""
     stack = getattr(bv, attr, None)
-    return len(stack) if stack is not None else -1
+    return len(stack) if stack is not None else None

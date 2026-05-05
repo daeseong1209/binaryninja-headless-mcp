@@ -14,7 +14,7 @@ from ._helpers import get_session, hex_or_none, undo_transaction
 
 
 @tool()
-def define_data_var(binary_id: str, addr: str, type_str: str, ctx: Context) -> dict[str, Any]:
+def define_data_var(binary_id: str, addr: str | int, type_str: str, ctx: Context) -> dict[str, Any]:
     """Define a typed data variable at the address.
 
     Parses type_str (e.g., 'uint64_t', 'char*', 'struct Foo*') via BN's
@@ -24,9 +24,11 @@ def define_data_var(binary_id: str, addr: str, type_str: str, ctx: Context) -> d
     session = get_session(sup, binary_id)
     bv = session.bv
 
+    if addr is None or not isinstance(addr, (str, int)):
+        raise invalid_address(addr)
     try:
         address = parse_address(addr)
-    except ValueError as exc:
+    except (ValueError, TypeError) as exc:
         raise invalid_address(addr) from exc
 
     if not type_str or not isinstance(type_str, str):
@@ -97,9 +99,17 @@ def define_type(binary_id: str, name: str, source: str, ctx: Context) -> dict[st
         raise type_parse_error(source, "backend does not expose parse_types_from_source")
 
     try:
-        result = parser(source)
+        parsed = parser(source)
     except Exception as exc:
         raise type_parse_error(source, str(exc)) from exc
+
+    # Real BN may return (TypeParserResult, errors) tuple in some paths
+    if isinstance(parsed, (tuple, list)) and parsed:
+        result = parsed[0]
+        parser_errors = parsed[1] if len(parsed) > 1 else None
+    else:
+        result = parsed
+        parser_errors = None
 
     if result is None:
         raise type_parse_error(source, "no types parsed")
@@ -111,7 +121,13 @@ def define_type(binary_id: str, name: str, source: str, ctx: Context) -> dict[st
     }
 
     if not types_map:
-        raise type_parse_error(source, "no types parsed (result.types is empty)")
+        err_detail = ""
+        if parser_errors:
+            err_detail = str(parser_errors)[:200]
+        raise type_parse_error(
+            source,
+            f"no types parsed (result.types empty); parser_errors={err_detail}",
+        )
 
     if name in types_map:
         type_obj = types_map[name]

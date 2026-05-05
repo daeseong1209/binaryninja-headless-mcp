@@ -12,6 +12,17 @@ from ..utils import paginate
 from ._helpers import get_session, hex_or_none, resolve_symbol_types, symbol_to_dict
 
 
+def _semantics_name(value: Any) -> str:
+    """Normalise a SectionSemantics enum or string to its human-readable name.
+
+    Real BN's SectionSemantics is an IntEnum; str() produces '1', '2' etc.
+    Using .name gives 'CodeSectionSemantics', matching mock behaviour.
+    """
+    if value is None:
+        return ""
+    return getattr(value, "name", str(value)) or ""
+
+
 @tool()
 def list_segments(binary_id: str, ctx: Context) -> dict[str, Any]:
     """List memory segments (start/end/r/w/x/data_offset/data_length)."""
@@ -52,7 +63,7 @@ def list_sections(binary_id: str, ctx: Context) -> dict[str, Any]:
                 "name": name,
                 "start": hex_or_none(getattr(sec, "start", None)),
                 "end": hex_or_none(getattr(sec, "end", None)),
-                "semantics": str(getattr(sec, "semantics", "") or ""),
+                "semantics": _semantics_name(getattr(sec, "semantics", None)),
             }
         )
     return {"items": items, "total": len(items)}

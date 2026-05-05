@@ -1,6 +1,6 @@
 [project]
 name = "binja-mcp"
-version = "0.1.0"
+version = "0.3.2"
 description = "Binary Ninja headless MCP server for Claude Code (OMC) and Codex CLI (OMX)"
 readme = "README.md"
 license = { text = "MIT" }
@@ -48,8 +48,12 @@ packages = ["src/binja_mcp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not perf'"
 markers = [
     "live: tests that require a real Binary Ninja installation and license",
+    "live_quick: live tests using tiny/header-only fixtures (~1s/case, ~30 cases)",
+    "live_full: live tests using full-analysis large fixtures (~10s+/case, ~20 cases)",
+    "perf: performance benchmarks (skip in CI by default)",
 ]
 asyncio_mode = "auto"
 

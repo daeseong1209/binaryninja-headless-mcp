@@ -6,6 +6,7 @@ backend so individual tool functions stay short.
 
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 from typing import Any
 
@@ -71,20 +72,40 @@ def symbol_to_dict(s: Any) -> dict[str, Any]:
 def undo_transaction(bv: Any):
     """Wrap a write block in a Binary Ninja undo group.
 
-    On entry, calls ``bv.begin_undo_actions()`` and yields the resulting
-    state_id (or None if the backend does not expose the API). On exit,
-    best-effort calls ``bv.commit_undo_actions(state_id)`` so any exception
-    raised inside the block is preserved.
+    If the mock backend already has an open undo state (e.g. the caller
+    invoked ``begin_undo`` explicitly), this nests cleanly: writes are appended
+    to that outer state and we do NOT begin/commit our own group. The outer
+    caller is responsible for commit.
+
+    On real BN, ``_open_undo_states`` is absent so ``has_outer`` is always
+    False and we always begin+commit our own group (existing behaviour).
     """
-    state_id = bv.begin_undo_actions() if hasattr(bv, "begin_undo_actions") else None
+    open_states = getattr(bv, "_open_undo_states", None)
+    has_outer = bool(open_states)  # truthy only on mock with an outer state open
+
+    state_id = None
+    if not has_outer and hasattr(bv, "begin_undo_actions"):
+        state_id = bv.begin_undo_actions()
+    body_failed = False
     try:
         yield state_id
+    except BaseException:
+        body_failed = True
+        raise
     finally:
+        # Only commit if WE opened the state (not an outer caller's group)
         if state_id is not None and hasattr(bv, "commit_undo_actions"):
             try:
                 bv.commit_undo_actions(state_id)
-            except Exception:
-                pass  # best-effort; don't mask the original error
+            except Exception as commit_exc:
+                if not body_failed:
+                    # Body succeeded but commit failed — surface it instead of silent success
+                    logging.getLogger(__name__).warning(
+                        "undo_transaction commit failed: %s "
+                        "(body succeeded; write may not be undoable)",
+                        commit_exc,
+                    )
+                # If body already failed, suppressing commit error is correct (don't mask original)
 
 
 def get_session(supervisor: Supervisor, binary_id: str) -> Session:
@@ -125,9 +146,17 @@ def find_function(bv: Any, addr_or_name: str | int) -> Any:
         if func is not None:
             return func
 
-    # 2. Try as a name. Mock exposes get_function_by_name; real BN uses symbols.
+    # 2. Try as a name. Real BN: get_functions_by_name (list); mock: get_function_by_name (single).
     name = addr_or_name if isinstance(addr_or_name, str) else str(addr_or_name)
 
+    # Real BN preferred: get_functions_by_name returns list[Function]
+    funcs_by_name = getattr(bv, "get_functions_by_name", None)
+    if funcs_by_name is not None:
+        matches = funcs_by_name(name)
+        if matches:
+            return matches[0]
+
+    # Mock fallback (single result)
     by_name = getattr(bv, "get_function_by_name", None)
     if by_name is not None:
         func = by_name(name)

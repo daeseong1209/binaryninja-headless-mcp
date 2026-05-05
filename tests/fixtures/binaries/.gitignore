@@ -1,0 +1,5 @@
+# Live test fixtures — keep directory tracked but ignore actual binaries
+# (system binaries are referenced by absolute path via env vars)
+*
+!.gitignore
+!README.md

@@ -6,7 +6,8 @@ from typing import Any
 
 from mcp.server.fastmcp import Context
 
-from ..errors import invalid_address
+from ..errors import INVALID_ADDRESS as _INVALID_ADDRESS
+from ..errors import BinjaError, invalid_address
 from ..registry import tool
 from ..server import get_supervisor
 from ..utils import paginate, parse_address
@@ -59,7 +60,7 @@ def list_symbols(
 
 
 @tool()
-def rename_symbol(binary_id: str, addr: str, new_name: str, ctx: Context) -> dict[str, Any]:
+def rename_symbol(binary_id: str, addr: str | int, new_name: str, ctx: Context) -> dict[str, Any]:
     """Rename a function or data symbol at the given address.
 
     Function path: assigns to func.name (preferred for functions).
@@ -70,9 +71,11 @@ def rename_symbol(binary_id: str, addr: str, new_name: str, ctx: Context) -> dic
     session = get_session(sup, binary_id)
     bv = session.bv
 
+    if addr is None or not isinstance(addr, (str, int)):
+        raise invalid_address(addr)
     try:
         address = parse_address(addr)
-    except ValueError as exc:
+    except (ValueError, TypeError) as exc:
         raise invalid_address(addr) from exc
 
     if not new_name or not isinstance(new_name, str):
@@ -82,7 +85,23 @@ def rename_symbol(binary_id: str, addr: str, new_name: str, ctx: Context) -> dic
     # a roll-backable entry regardless of which write path is taken.
     with undo_transaction(bv):
         # Function path (preferred)
-        func = bv.get_function_at(address)
+        func = bv.get_function_at(address) if hasattr(bv, "get_function_at") else None
+        if func is None:
+            # Real BN: check if address is *inside* a function but not its start
+            getter = getattr(bv, "get_functions_containing", None)
+            if getter is not None:
+                contained = list(getter(address) or [])
+                if contained:
+                    raise BinjaError(
+                        _INVALID_ADDRESS,
+                        f"address 0x{address:x} is inside function "
+                        f"{contained[0].name} (0x{contained[0].start:x}) "
+                        "but not its start; pass the function start address to rename",
+                        value=hex(address),
+                        hint="use list_functions to find function start addresses",
+                        containing_function=getattr(contained[0], "name", None),
+                        containing_start=hex(getattr(contained[0], "start", 0) or 0),
+                    )
         if func is not None:
             old = getattr(func, "name", None)
             if hasattr(bv, "rename_function"):
@@ -98,7 +117,14 @@ def rename_symbol(binary_id: str, addr: str, new_name: str, ctx: Context) -> dic
                 "after": new_name,
             }
 
-        # Data symbol path
+        # Data symbol path — capture existing name before overwriting
+        existing = None
+        syms = list(bv.get_symbols()) if hasattr(bv, "get_symbols") else []
+        for s in syms:
+            if getattr(s, "address", None) == address:
+                existing = getattr(s, "name", None)
+                break
+
         try:
             from binaryninja import Symbol, SymbolType  # type: ignore[import]
             sym_obj = Symbol(SymbolType.DataSymbol, address, new_name)
@@ -108,7 +134,7 @@ def rename_symbol(binary_id: str, addr: str, new_name: str, ctx: Context) -> dic
         return {
             "kind": "data",
             "address": hex_or_none(address),
-            "before": None,
+            "before": existing,
             "after": new_name,
         }
 

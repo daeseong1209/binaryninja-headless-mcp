@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "mcp__binja-mcp__open_binary"
+      "mcp__binja-mcp__open_binary",
+      "Bash(node *)"
     ]
   }
 }
