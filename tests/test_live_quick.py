@@ -686,3 +686,65 @@ def test_C35_x86_decompile_entry_not_repr(tiny_x86_session):
     text = result["text"]
     assert "<HighLevelILFunction" not in text
     assert "ILFunction" not in text
+
+
+# ===========================================================================
+# Group D: ByteSearch — search_bytes / search_pattern on tiny x64 fixture
+# ===========================================================================
+
+
+class TestByteSearchLive:
+    """Live tests for the v0.4 byte_search tool group."""
+
+    @pytest.mark.live_quick
+    def test_D01_search_bytes_ret_instruction_in_executable(self, tiny_x64_session):
+        """`c3` (RET) should appear many times, all inside executable segments."""
+        from binja_mcp.tools import byte_search as t_byte_search  # noqa: PLC0415
+        from binja_mcp.tools import sections as t_sections  # noqa: PLC0415
+
+        sup = tiny_x64_session["supervisor"]
+        binary_id = tiny_x64_session["binary_id"]
+        ctx = _ctx(sup)
+
+        # Fetch an extra-large page so we can confidently assert >= 20 hits.
+        result = t_byte_search.search_bytes(binary_id, "c3", ctx, limit=10_000)
+        assert result["total"] >= 20
+
+        # Build the union of executable segment ranges and confirm every match
+        # falls inside one of them.
+        segs = t_sections.list_segments(binary_id, ctx)
+        exec_ranges = [
+            (int(s["start"], 16), int(s["end"], 16))
+            for s in segs["items"]
+            if s["executable"]
+        ]
+        assert exec_ranges, "expected at least one executable segment"
+        for item in result["items"][:50]:
+            addr = int(item["address"], 16)
+            assert any(lo <= addr < hi for lo, hi in exec_ranges), (
+                f"RET match 0x{addr:x} outside any executable segment"
+            )
+
+    @pytest.mark.live_quick
+    def test_D02_search_pattern_finds_x64_mov_prologue(self, tiny_x64_session):
+        """`48 89 ??` covers many `mov reg, reg` x86_64 prologue instructions."""
+        from binja_mcp.tools import byte_search as t_byte_search  # noqa: PLC0415
+
+        sup = tiny_x64_session["supervisor"]
+        binary_id = tiny_x64_session["binary_id"]
+        ctx = _ctx(sup)
+        result = t_byte_search.search_pattern(binary_id, "48 89 ??", ctx, limit=5000)
+        assert result["total"] >= 1
+
+    @pytest.mark.live_quick
+    def test_D03_search_bytes_absent_pattern_returns_zero(self, tiny_x64_session):
+        """A 32-byte sequential pattern is overwhelmingly unlikely in a tiny PE."""
+        from binja_mcp.tools import byte_search as t_byte_search  # noqa: PLC0415
+
+        sup = tiny_x64_session["supervisor"]
+        binary_id = tiny_x64_session["binary_id"]
+        ctx = _ctx(sup)
+        absent = " ".join(f"{b:02x}" for b in range(32))  # "00 01 02 ... 1f"
+        result = t_byte_search.search_bytes(binary_id, absent, ctx)
+        assert result["total"] == 0
+        assert result["items"] == []

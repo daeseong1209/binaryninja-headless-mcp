@@ -86,6 +86,7 @@ def undo_state_invalid(state_id: str) -> BinjaError:
 
 TYPE_PARSE_ERROR = "TYPE_PARSE_ERROR"
 SYMBOL_NOT_FOUND = "SYMBOL_NOT_FOUND"
+BYTE_SEARCH_INVALID_PATTERN = "BYTE_SEARCH_INVALID_PATTERN"
 
 
 def type_parse_error(source: str, original: str = "") -> BinjaError:
@@ -104,4 +105,17 @@ def symbol_not_found(target: Any) -> BinjaError:
         f"symbol not found: {target!r}",
         target=str(target),
         hint="use list_symbols to enumerate available symbols",
+    )
+
+
+def byte_search_invalid_pattern(pattern: Any, reason: str) -> BinjaError:
+    return BinjaError(
+        BYTE_SEARCH_INVALID_PATTERN,
+        f"invalid hex pattern: {reason}",
+        pattern=str(pattern)[:200],
+        reason=reason,
+        hint=(
+            "use whole-byte hex (1-1024 bytes), e.g. '48 89 e5 c3'"
+            " or '4889e5c3'; search_pattern also accepts '??' wildcards"
+        ),
     )

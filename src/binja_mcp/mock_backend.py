@@ -131,6 +131,7 @@ class MockBinaryView:
     _xrefs_to: dict[int, list[MockReference]] = field(default_factory=dict)
     data_vars: dict[int, MockDataVariable] = field(default_factory=dict)
     user_types: dict[str, str] = field(default_factory=dict)
+    _data_blob: bytes = field(default=b"", init=False, repr=False, compare=False)
     _undo_stack: list[dict] = field(default_factory=list, init=False, repr=False, compare=False)
     _redo_stack: list[dict] = field(default_factory=list, init=False, repr=False, compare=False)
     _open_undo_states: dict[str, list] = field(
@@ -260,6 +261,52 @@ class MockBinaryView:
                 is_export=True,
             )
         )
+        self._seed_searchable_blob()
+
+    def _seed_searchable_blob(self) -> None:
+        """Build a deterministic byte blob covering every populated segment.
+
+        Layout matches the segments' ``data_offset``/``data_length`` so that
+        ``read(seg.start + k)`` returns ``_data_blob[seg.data_offset + k]``.
+        The .text segment gets a fixed 16-byte preamble repeated to fill its
+        length (Windows-x64-style ``mov rbp, rsp`` / ``sub rsp, 0x10`` / ``ret``
+        sequence) so byte-search tests see at least two distinct match sites.
+        The .data segment is filled with NULs and then the ASCII content of
+        ``self.strings`` is written at each string's offset.
+        """
+        if not self.segments:
+            self._data_blob = b""
+            return
+
+        total = max(seg.data_offset + seg.data_length for seg in self.segments)
+        blob = bytearray(total)
+
+        # Code-like preamble repeated across every executable segment.
+        preamble = b"\x48\x89\xe5\x48\x83\xec\x10\xc3" * 2  # 16 bytes
+        for seg in self.segments:
+            if not seg.executable or seg.data_length == 0:
+                continue
+            chunk = (preamble * ((seg.data_length // len(preamble)) + 1))[: seg.data_length]
+            blob[seg.data_offset : seg.data_offset + seg.data_length] = chunk
+
+        # Embed each MockString's ASCII bytes inside the segment that contains it.
+        for s in self.strings:
+            seg = self._segment_for_address(s.address)
+            if seg is None:
+                continue
+            offset_in_seg = s.address - seg.start
+            payload = s.value.encode("utf-8", errors="replace") + b"\x00"
+            write_at = seg.data_offset + offset_in_seg
+            end_at = min(write_at + len(payload), seg.data_offset + seg.data_length)
+            blob[write_at:end_at] = payload[: end_at - write_at]
+
+        self._data_blob = bytes(blob)
+
+    def _segment_for_address(self, addr: int) -> MockSegment | None:
+        for seg in self.segments:
+            if seg.start <= addr < seg.end:
+                return seg
+        return None
 
     # Undo / redo API surface --------------------------------------------------
 
@@ -519,8 +566,26 @@ class MockBinaryView:
         return list(self.strings)
 
     def read(self, addr: int, length: int) -> bytes:
-        # Return a deterministic but uninteresting buffer
-        return bytes((addr + i) & 0xFF for i in range(length))
+        """Return up to ``length`` bytes starting at virtual address ``addr``.
+
+        Maps ``addr`` through the matching segment's ``data_offset`` into the
+        backing ``_data_blob``. Returns an empty bytes object when the address
+        is not covered by any populated segment, mimicking real BN behaviour
+        where unmapped reads yield short / empty results. Reads that cross a
+        segment boundary are truncated to the originating segment's tail.
+        """
+        if length <= 0 or not self._data_blob:
+            return b""
+        seg = self._segment_for_address(addr)
+        if seg is None or not seg.readable:
+            return b""
+        offset_in_seg = addr - seg.start
+        available = max(0, seg.data_length - offset_in_seg)
+        take = min(length, available)
+        if take <= 0:
+            return b""
+        start = seg.data_offset + offset_in_seg
+        return self._data_blob[start : start + take]
 
 
 def load(path: str, update_analysis: bool = True) -> MockBinaryView:  # noqa: ARG001

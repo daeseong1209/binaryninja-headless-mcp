@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from binja_mcp.tools import byte_search as t_byte_search
 from binja_mcp.tools import decompile as t_decompile
 from binja_mcp.tools import functions as t_functions
 from binja_mcp.tools import info as t_info
@@ -801,6 +802,151 @@ class TestTypes:
         assert "C-style" in err.extra["hint"] or "declaration" in err.extra["hint"]
 
 
+# --- byte_search ------------------------------------------------------------
+
+
+class TestByteSearch:
+    """Mock-backend tests for search_bytes / search_pattern."""
+
+    # ----- search_bytes basic behaviour -------------------------------------
+
+    def test_search_bytes_finds_known_preamble(self, ctx, open_id):
+        """The mock seeds 0x48 0x89 0xe5 in every executable segment."""
+        result = t_byte_search.search_bytes(open_id, "48 89 e5", ctx)
+        assert result["total"] >= 1
+        for item in result["items"]:
+            assert item["address"].startswith("0x")
+
+    def test_search_bytes_absent_pattern_returns_zero(self, ctx, open_id):
+        """A pattern not present in the seeded blob yields no hits."""
+        result = t_byte_search.search_bytes(open_id, "de ad be ef ca fe ba be", ctx)
+        assert result["total"] == 0
+        assert result["items"] == []
+        assert result["has_more"] is False
+
+    def test_search_bytes_pagination(self, ctx, open_id):
+        """offset/limit slice the underlying match list."""
+        full = t_byte_search.search_bytes(open_id, "48", ctx, limit=1000)
+        assert full["total"] >= 2  # at least two preamble repeats per segment
+        page = t_byte_search.search_bytes(open_id, "48", ctx, offset=0, limit=1)
+        assert page["limit"] == 1
+        assert len(page["items"]) == 1
+        assert page["total"] == full["total"]
+        assert page["has_more"] is (full["total"] > 1)
+
+    def test_search_bytes_start_end_clamp(self, ctx, open_id):
+        """start/end restrict the search window across segments."""
+        info = t_info.binary_info(open_id, ctx)
+        entry = int(info["entry_point"], 16)
+        # Tight window of 4 bytes at the entry point catches at most one match.
+        clamped = t_byte_search.search_bytes(
+            open_id,
+            "48 89 e5",
+            ctx,
+            start=hex(entry),
+            end=hex(entry + 4),
+        )
+        assert clamped["total"] <= 1
+        # The same pattern over the full binary always finds more.
+        full = t_byte_search.search_bytes(open_id, "48 89 e5", ctx)
+        assert full["total"] >= clamped["total"]
+
+    def test_search_bytes_accepts_int_addresses(self, ctx, open_id):
+        """start/end may be passed as Python ints, not just hex strings."""
+        info = t_info.binary_info(open_id, ctx)
+        entry = int(info["entry_point"], 16)
+        result = t_byte_search.search_bytes(
+            open_id, "48 89 e5", ctx, start=entry, end=entry + 0x300
+        )
+        assert "items" in result
+
+    # ----- search_pattern wildcard behaviour --------------------------------
+
+    def test_search_pattern_wildcard_middle(self, ctx, open_id):
+        """`48 89 ?? 48` matches the seeded `48 89 e5 48` preamble."""
+        result = t_byte_search.search_pattern(open_id, "48 89 ?? 48", ctx)
+        assert result["total"] >= 1
+
+    def test_search_pattern_wildcard_at_start(self, ctx, open_id):
+        """Wildcard in the leading position is anchored on a fixed byte."""
+        result = t_byte_search.search_pattern(open_id, "?? 89 e5", ctx)
+        assert result["total"] >= 1
+
+    def test_search_pattern_wildcard_at_end(self, ctx, open_id):
+        """Trailing wildcard is anchored on the leading bytes."""
+        result = t_byte_search.search_pattern(open_id, "48 89 e5 ??", ctx)
+        assert result["total"] >= 1
+
+    # ----- hex format variants ----------------------------------------------
+
+    @pytest.mark.parametrize(
+        "spelling",
+        ["48 89 e5", "4889e5", "48,89,e5", "48, 89, e5", "48\t89\te5"],
+    )
+    def test_search_bytes_format_variants_equivalent(self, ctx, open_id, spelling):
+        """Spaces, commas, and concatenated forms produce identical matches."""
+        canonical = t_byte_search.search_bytes(open_id, "4889e5", ctx, limit=1000)
+        variant = t_byte_search.search_bytes(open_id, spelling, ctx, limit=1000)
+        assert variant["total"] == canonical["total"]
+        assert [it["address"] for it in variant["items"]] == [
+            it["address"] for it in canonical["items"]
+        ]
+
+    # ----- pattern validation -----------------------------------------------
+
+    def test_empty_pattern_rejected(self, ctx, open_id):
+        from binja_mcp.errors import BYTE_SEARCH_INVALID_PATTERN, BinjaError
+
+        with pytest.raises(BinjaError) as exc_info:
+            t_byte_search.search_bytes(open_id, "", ctx)
+        assert exc_info.value.code == BYTE_SEARCH_INVALID_PATTERN
+        assert "pattern" in exc_info.value.extra
+
+    def test_odd_nibble_pattern_rejected(self, ctx, open_id):
+        from binja_mcp.errors import BYTE_SEARCH_INVALID_PATTERN, BinjaError
+
+        with pytest.raises(BinjaError) as exc_info:
+            t_byte_search.search_bytes(open_id, "48 8", ctx)
+        assert exc_info.value.code == BYTE_SEARCH_INVALID_PATTERN
+        assert "odd" in exc_info.value.extra["reason"]
+
+    def test_non_hex_character_rejected(self, ctx, open_id):
+        from binja_mcp.errors import BYTE_SEARCH_INVALID_PATTERN, BinjaError
+
+        with pytest.raises(BinjaError) as exc_info:
+            t_byte_search.search_bytes(open_id, "48 zz e5 c3", ctx)
+        err = exc_info.value
+        assert err.code == BYTE_SEARCH_INVALID_PATTERN
+        assert "invalid hex char" in err.extra["reason"]
+        assert "position" in err.extra["reason"]
+
+    def test_pattern_too_long_rejected(self, ctx, open_id):
+        """1025-byte pattern (2050 hex chars) exceeds MAX_PATTERN_BYTES."""
+        from binja_mcp.errors import BYTE_SEARCH_INVALID_PATTERN, BinjaError
+
+        oversized = "ab" * 1025
+        with pytest.raises(BinjaError) as exc_info:
+            t_byte_search.search_bytes(open_id, oversized, ctx)
+        assert exc_info.value.code == BYTE_SEARCH_INVALID_PATTERN
+        assert "too long" in exc_info.value.extra["reason"]
+
+    def test_search_bytes_rejects_wildcards(self, ctx, open_id):
+        """search_bytes must not silently accept '??'; that's search_pattern's job."""
+        from binja_mcp.errors import BYTE_SEARCH_INVALID_PATTERN, BinjaError
+
+        with pytest.raises(BinjaError) as exc_info:
+            t_byte_search.search_bytes(open_id, "48 ?? e5", ctx)
+        assert exc_info.value.code == BYTE_SEARCH_INVALID_PATTERN
+
+    def test_search_pattern_all_wildcards_rejected(self, ctx, open_id):
+        """A pattern of only '??' bytes is not a useful search."""
+        from binja_mcp.errors import BYTE_SEARCH_INVALID_PATTERN, BinjaError
+
+        with pytest.raises(BinjaError) as exc_info:
+            t_byte_search.search_pattern(open_id, "?? ?? ??", ctx)
+        assert exc_info.value.code == BYTE_SEARCH_INVALID_PATTERN
+
+
 # --- registry sanity --------------------------------------------------------
 
 
@@ -832,6 +978,8 @@ def test_registry_contains_all_core_tools():
         "define_data_var",
         "get_type",
         "define_type",
+        "search_bytes",
+        "search_pattern",
     }
     assert expected.issubset(names), f"missing: {expected - names}"
-    assert len(names) == 23, f"expected 23 tools, got {len(names)}: {sorted(names)}"
+    assert len(names) == 25, f"expected 25 tools, got {len(names)}: {sorted(names)}"

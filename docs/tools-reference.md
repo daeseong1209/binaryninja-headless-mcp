@@ -195,6 +195,45 @@ Search strings discovered by Binary Ninja's analysis.
 - Set `regex=True` to interpret `pattern` as a Python regular expression.
 - Items contain `{"value", "address", "length"}`.
 
+## v0.4 — Byte search
+
+Two read-only tools that scan a binary's readable segments for byte sequences
+without depending on any BN-version-specific search API. Both honour an
+inclusive `start` and exclusive `end` address window, return the standard
+paginated `{items, offset, limit, total, has_more}` envelope, and add an
+optional `note: "result capped at 10000"` field when the internal DoS guard
+truncates the scan.
+
+### `search_bytes(binary_id, hex_pattern, start=None, end=None, offset=0, limit=100)`
+Locate exact byte sequences. `hex_pattern` accepts spaces, commas, or
+concatenated hex (e.g. `"48 89 e5 c3"`, `"4889e5c3"`, `"48,89,e5,c3"`).
+`??` wildcards are **rejected** — use `search_pattern` for those.
+
+```json
+{
+  "items": [{"address": "0x401000"}],
+  "offset": 0, "limit": 100, "total": N, "has_more": false
+}
+```
+
+### `search_pattern(binary_id, hex_pattern, start=None, end=None, offset=0, limit=100)`
+Same as `search_bytes` but `??` may stand in for any single byte
+(e.g. `"48 89 ?? c3"`). Half-nibble wildcards (`"4?"`) are rejected, and a
+pattern of only `??` bytes is rejected — at least one fixed byte is required.
+
+### Limits
+- Pattern length: 1-1024 bytes (each `??` counts as one byte).
+- Result cap: 10000 matches per call; overflow truncates and adds `note`.
+- Non-readable segments are skipped automatically.
+
+### Errors
+| Condition | Exception |
+|-----------|-----------|
+| Empty / odd-nibble / non-hex pattern | `BinjaError(BYTE_SEARCH_INVALID_PATTERN)` |
+| Pattern > 1024 bytes | `BinjaError(BYTE_SEARCH_INVALID_PATTERN)` |
+| `??` passed to `search_bytes` | `BinjaError(BYTE_SEARCH_INVALID_PATTERN)` |
+| All-wildcard `search_pattern` input | `BinjaError(BYTE_SEARCH_INVALID_PATTERN)` |
+
 ---
 
 ## Error semantics
