@@ -19,6 +19,12 @@ _BN_ENV_DEFAULTS = {
     "BN_DISABLE_USER_PLUGINS": "True",
 }
 
+_TRUTHY = ("1", "true", "yes")
+
+
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").lower() in _TRUTHY
+
 
 def configure_environment() -> None:
     """Set Binary Ninja environment variables before module import.
@@ -30,13 +36,19 @@ def configure_environment() -> None:
         os.environ.setdefault(key, value)
 
 
-def import_binaryninja(allow_mock: bool = True):
+def import_binaryninja(allow_mock: bool = False):
     """Import the real binaryninja module, or fall back to the mock backend.
+
+    If BINJA_MCP_ALLOW_MOCK=1 or BINJA_MCP_FORCE_MOCK=1 is set, allow_mock is
+    automatically promoted to True regardless of the caller-supplied value.
 
     Returns:
         Tuple of (module, is_mock).
     """
     configure_environment()
+    if is_mock_only():
+        allow_mock = True
+
     try:
         import binaryninja  # type: ignore[import-not-found]
 
@@ -54,5 +66,5 @@ def import_binaryninja(allow_mock: bool = True):
 
 
 def is_mock_only() -> bool:
-    """Return True if BINJA_MCP_FORCE_MOCK is set (test/CI environments)."""
-    return os.environ.get("BINJA_MCP_FORCE_MOCK", "").lower() in ("1", "true", "yes")
+    """Return True if BINJA_MCP_FORCE_MOCK or BINJA_MCP_ALLOW_MOCK is set (test/CI environments)."""
+    return _env_truthy("BINJA_MCP_FORCE_MOCK") or _env_truthy("BINJA_MCP_ALLOW_MOCK")

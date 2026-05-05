@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from binja_mcp.supervisor import BinaryNotFoundError
+from binja_mcp.supervisor import MAX_OPEN_BINARIES, BinaryNotFoundError
 
 
 def test_supervisor_uses_mock(supervisor):
@@ -69,3 +69,27 @@ def test_get_touches_last_accessed(supervisor, fixture_binary):
     first = s1.last_accessed
     s2 = supervisor.get(binary_id)
     assert s2.last_accessed >= first
+
+
+def test_max_open_binaries_enforced(supervisor, fixture_binary):
+    """Opening more than MAX_OPEN_BINARIES binaries raises RuntimeError."""
+    for _ in range(MAX_OPEN_BINARIES):
+        supervisor.open(str(fixture_binary))
+    with pytest.raises(RuntimeError, match="too many open binaries"):
+        supervisor.open(str(fixture_binary))
+
+
+def test_binary_id_is_token_hex_32(supervisor, fixture_binary):
+    """binary_id must be a 32-character hex string (secrets.token_hex(16))."""
+    binary_id = supervisor.open(str(fixture_binary))
+    assert len(binary_id) == 32
+    assert all(c in "0123456789abcdef" for c in binary_id)
+
+
+def test_use_session_blocks_close(supervisor, fixture_binary):
+    """After close, use_session raises RuntimeError or BinaryNotFoundError."""
+    binary_id = supervisor.open(str(fixture_binary))
+    supervisor.close(binary_id)
+    with pytest.raises((RuntimeError, BinaryNotFoundError)):
+        with supervisor.use_session(binary_id):
+            pass

@@ -6,6 +6,8 @@ that decorated itself with @tool() into the FastMCP instance.
 
 from __future__ import annotations
 
+__all__ = ["build_server", "get_supervisor", "AppContext", "mcp"]
+
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager

@@ -8,7 +8,13 @@ from mcp.server.fastmcp import Context
 
 from ..registry import tool
 from ..server import get_supervisor
-from ._helpers import get_session, hex_or_none
+from ._helpers import (
+    get_arch_name,
+    get_function_count,
+    get_platform_name,
+    get_session,
+    hex_or_none,
+)
 
 
 @tool()
@@ -21,29 +27,15 @@ def binary_info(binary_id: str, ctx: Context) -> dict[str, Any]:
     session = get_session(sup, binary_id)
     bv = session.bv
 
-    arch = getattr(bv, "arch", None)
-    arch_name = getattr(arch, "name", None) if arch is not None else getattr(bv, "arch_name", None)
-    platform = getattr(bv, "platform", None)
-    platform_name = (
-        getattr(platform, "name", None)
-        if platform is not None
-        else getattr(bv, "platform_name", None)
-    )
-    entry = getattr(bv, "entry_point", None)
     file_obj = getattr(bv, "file", None)
     filename = getattr(file_obj, "filename", None) or session.path
-
-    try:
-        function_count = len(list(getattr(bv, "functions", []) or []))
-    except Exception:
-        function_count = None
 
     return {
         "binary_id": binary_id,
         "filename": filename,
-        "arch": arch_name,
-        "platform": platform_name,
-        "entry_point": hex_or_none(entry),
-        "function_count": function_count,
+        "arch": get_arch_name(bv),
+        "platform": get_platform_name(bv),
+        "entry_point": hex_or_none(getattr(bv, "entry_point", None)),
+        "function_count": get_function_count(bv),
         "is_mock": session.is_mock,
     }

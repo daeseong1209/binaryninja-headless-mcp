@@ -104,10 +104,27 @@ double-check the client's MCP configuration.
 
 ---
 
+## Live tests
+
+To run the integration tests against a real binary (requires a Binary Ninja
+Commercial or Ultimate license and `binaryninja` importable in your environment):
+
+```bash
+BINJA_MCP_LIVE_TARGET=/path/to/real/binary pytest -m live
+```
+
+The `live` marker is defined in `pyproject.toml`. Live tests are skipped
+automatically when `BINJA_MCP_LIVE_TARGET` is not set so they never block CI.
+
+---
+
 ## Environment variables
 
 | Variable | Purpose |
 |----------|---------|
-| `BINJA_MCP_FORCE_MOCK` | Set to `1` to force the mock backend even if `binaryninja` is importable. |
+| `BINJA_MCP_FORCE_MOCK` | Set to `1` to force the mock backend even if `binaryninja` is importable. CI/testing only. |
+| `BINJA_MCP_ALLOW_MOCK` | Set to `1` to allow the server to fall back to the mock backend on import failure (not recommended for production). |
+| `BINJA_MCP_ALLOWED_ROOTS` | Colon-separated (POSIX) or semicolon-separated (Windows) list of directory roots the server is permitted to open. Paths outside these roots are rejected with `PermissionError`. Unset = no restriction. |
+| `BINJA_MCP_LIVE_TARGET` | Absolute path to a real binary used by `pytest -m live` integration tests. |
 | `BN_DISABLE_USER_SETTINGS` | Set automatically to `True`. Override only if you need user settings honoured. |
 | `BN_DISABLE_USER_PLUGINS` | Set automatically to `True`. Override only if you need user plugins loaded inside the MCP server. |

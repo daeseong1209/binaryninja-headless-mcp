@@ -25,8 +25,17 @@ def parse_address(value: str | int) -> int:
         raise ValueError(f"invalid address: {value!r}") from exc
 
 
-def paginate(items: list[Any], offset: int = 0, limit: int = 100) -> dict[str, Any]:
+def paginate(
+    items: list[Any],
+    offset: int = 0,
+    limit: int = 100,
+    total: int | None = None,
+) -> dict[str, Any]:
     """Apply offset/limit pagination and return a structured response.
+
+    If total is provided explicitly it is used as the authoritative count
+    (useful when items is already a sliced page). Otherwise total is derived
+    from len(items).
 
     Returns:
         {"items": [...], "offset": N, "limit": N, "total": N, "has_more": bool}
@@ -35,10 +44,16 @@ def paginate(items: list[Any], offset: int = 0, limit: int = 100) -> dict[str, A
         raise ValueError(f"offset must be >= 0, got {offset}")
     if limit <= 0:
         raise ValueError(f"limit must be > 0, got {limit}")
-    total = len(items)
-    end = min(offset + limit, total)
+    if total is None:
+        total = len(items)
+        end = min(offset + limit, total)
+        page = items[offset:end]
+    else:
+        # items is already sliced; just cap the page to limit
+        page = list(items)[:limit]
+        end = offset + len(page)
     return {
-        "items": items[offset:end],
+        "items": page,
         "offset": offset,
         "limit": limit,
         "total": total,

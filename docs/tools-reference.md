@@ -70,14 +70,19 @@ Search strings discovered by Binary Ninja's analysis.
 
 ## Error semantics
 
-| Condition | Exception |
-|-----------|-----------|
-| Unknown `binary_id` | `ValueError("unknown binary_id: ...")` |
-| File missing on `open_binary` | `FileNotFoundError` |
-| Path is not a regular file | `ValueError` |
-| Function not found by name/address | `ValueError("function not found: ...")` |
-| Invalid IL level | `ValueError("unknown IL level: ...")` |
-| `offset` < 0 or `limit` ≤ 0 | `ValueError` |
+| Tool | Condition | Exception |
+|------|-----------|-----------|
+| any | Unknown `binary_id` | `ValueError("unknown binary_id: ...")` |
+| `open_binary` | File missing | `FileNotFoundError` |
+| `open_binary` | Path is a symlink | `PermissionError("symlinks not allowed")` |
+| `open_binary` | Path outside `BINJA_MCP_ALLOWED_ROOTS` | `PermissionError("path ... is outside allowed roots: ...")` |
+| `open_binary` | Path is not a regular file | `ValueError` |
+| `open_binary` | Too many binaries already open (> 32) | `RuntimeError("too many open binaries (max 32)")` |
+| any | Function not found by name/address | `ValueError("function not found: ...")` |
+| `get_il` / `decompile` | Invalid IL level | `ValueError("unknown IL level: ...")` |
+| `list_functions` | `offset` < 0 or `limit` ≤ 0 | `ValueError` |
+| `search_strings` | `pattern` exceeds 256 characters | `ValueError("pattern too long (max 256)")` |
+| `search_strings` | Regex evaluation exceeds 2 s | `TimeoutError("regex match exceeded 2.0s")` |
 
 All exceptions surface to the MCP client as a tool error with the original
 message intact.

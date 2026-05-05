@@ -6,6 +6,7 @@ from typing import Any
 
 from mcp.server.fastmcp import Context
 
+from ..errors import invalid_address
 from ..registry import tool
 from ..server import get_supervisor
 from ..utils import parse_address, truncate_text
@@ -94,10 +95,8 @@ def get_disasm(
     # Raw address path
     try:
         addr = parse_address(addr_or_name)
-    except ValueError as exc:
-        raise ValueError(
-            f"could not interpret {addr_or_name!r} as function or address"
-        ) from exc
+    except ValueError:
+        raise invalid_address(addr_or_name) from None
 
     text = _raw_disasm(bv, addr, length)
     return {

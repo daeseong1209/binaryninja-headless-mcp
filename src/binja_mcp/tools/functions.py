@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 from typing import Any
 
 from mcp.server.fastmcp import Context
@@ -27,6 +28,23 @@ def list_functions(
     sup = get_supervisor(ctx)
     session = get_session(sup, binary_id)
     bv = session.bv
-    funcs = list(getattr(bv, "functions", []) or [])
-    summaries = [function_to_summary(f) for f in funcs]
-    return paginate(summaries, offset=offset, limit=limit)
+
+    funcs = getattr(bv, "functions", None) or []
+
+    # Determine total without forcing full materialisation where possible
+    if hasattr(funcs, "__len__"):
+        total = len(funcs)
+        funcs_seq = funcs
+    else:
+        funcs_list = list(funcs)
+        total = len(funcs_list)
+        funcs_seq = funcs_list
+
+    # Slice only the requested page before summarising
+    if hasattr(funcs_seq, "__getitem__"):
+        sliced = list(funcs_seq[offset : offset + limit])
+    else:
+        sliced = list(itertools.islice(funcs_seq, offset, offset + limit))
+
+    summaries = [function_to_summary(f) for f in sliced]
+    return paginate(summaries, offset=offset, limit=limit, total=total)

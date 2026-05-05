@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 
 from . import __version__
+
+_NETWORK_TRANSPORTS = ("sse", "streamable-http")
 
 
 def _configure_logging(level: str) -> None:
@@ -31,12 +34,47 @@ def main() -> None:
         help="MCP transport (default: stdio)",
     )
     parser.add_argument(
+        "--bind",
+        default="127.0.0.1",
+        help="Bind address for network transports (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--allow-public",
+        action="store_true",
+        default=False,
+        help="Allow binding to non-loopback addresses (required when --bind != 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--allow-mock",
+        action="store_true",
+        default=False,
+        help="Allow mock backend (sets BINJA_MCP_ALLOW_MOCK=1)",
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
         help="Logging verbosity (default: INFO)",
     )
     args = parser.parse_args()
+
+    if args.allow_mock:
+        os.environ["BINJA_MCP_ALLOW_MOCK"] = "1"
+
+    if args.transport in _NETWORK_TRANSPORTS:
+        if args.bind != "127.0.0.1" and not args.allow_public:
+            parser.error(
+                f"public bind requires --allow-public "
+                f"(refusing to expose {args.transport} on {args.bind} without explicit consent)"
+            )
+        if args.allow_public:
+            print(
+                "\033[1mWARNING: binja-mcp is binding to a non-loopback address.\n"
+                "This exposes the MCP server on the network. You are responsible\n"
+                "for ensuring access is restricted (firewall, auth proxy, VPN, etc.).\033[0m",
+                file=sys.stderr,
+            )
+
     _configure_logging(args.log_level)
 
     # Import inside main() so --help / --version don't pay the cost
