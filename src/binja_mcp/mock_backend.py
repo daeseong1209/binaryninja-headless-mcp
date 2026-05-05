@@ -16,6 +16,7 @@ import uuid
 from dataclasses import dataclass, field
 from enum import IntEnum
 from pathlib import Path
+from typing import Any
 
 
 class MockSymbolType(IntEnum):
@@ -85,6 +86,8 @@ class MockFunction:
     _mlil: str = "// mock MLIL\n"
     _llil: str = "// mock LLIL\n"
     _disasm: str = "nop\n"
+    _comments: dict[int, str] = field(default_factory=dict)
+    _bv: Any = field(default=None, repr=False, compare=False)
 
     @property
     def hlil(self) -> str:
@@ -97,6 +100,29 @@ class MockFunction:
     @property
     def llil(self) -> str:
         return self._llil
+
+    @property
+    def comments(self) -> dict[int, str]:
+        return dict(self._comments)
+
+    def set_comment_at(self, addr: int, text: str) -> None:
+        before = self._comments.get(addr, "")
+        if text:
+            self._comments[addr] = text
+        else:
+            self._comments.pop(addr, None)
+        if self._bv is not None:
+            self._bv._record_undo(
+                "comment",
+                scope="function",
+                func_start=self.start,
+                addr=addr,
+                before=before,
+                after=text,
+            )
+
+    def get_comment_at(self, addr: int) -> str:
+        return self._comments.get(addr, "")
 
 
 @dataclass
@@ -136,11 +162,18 @@ class MockBinaryView:
     _open_undo_states: dict[str, list] = field(
         default_factory=dict, init=False, repr=False, compare=False
     )
+    _address_comments: dict[int, str] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         self.file = MockFile(self.path)
         if not self.functions:
             self._populate_default()
+        # Wire each function back to this BV so per-function comment writes can
+        # record undo entries through the shared stack.
+        for f in self.functions:
+            f._bv = self
 
     def _populate_default(self) -> None:
         # Deterministic mock contents seeded from path
@@ -338,6 +371,17 @@ class MockBinaryView:
                 self.user_types.pop(type_name, None)
             else:
                 self.user_types[type_name] = before
+        elif kind == "comment":
+            addr = entry["addr"]
+            before = entry["before"]
+            scope = entry.get("scope", "global")
+            store = self._comment_store(scope, entry.get("func_start"))
+            if store is None:
+                return
+            if before:
+                store[addr] = before
+            else:
+                store.pop(addr, None)
 
     def _reapply_entry(self, entry: dict) -> None:
         """Re-apply a single undo entry by restoring 'after' state."""
@@ -370,6 +414,25 @@ class MockBinaryView:
             type_name = entry["type_name"]
             after = entry["after"]
             self.user_types[type_name] = after
+        elif kind == "comment":
+            addr = entry["addr"]
+            after = entry["after"]
+            scope = entry.get("scope", "global")
+            store = self._comment_store(scope, entry.get("func_start"))
+            if store is None:
+                return
+            if after:
+                store[addr] = after
+            else:
+                store.pop(addr, None)
+
+    def _comment_store(self, scope: str, func_start: int | None) -> dict[int, str] | None:
+        if scope == "global":
+            return self._address_comments
+        if scope == "function" and func_start is not None:
+            f = self.get_function_at(func_start)
+            return f._comments if f is not None else None
+        return None
 
     def _record_undo(self, kind: str, **payload) -> None:
         """Append an entry to the most recent open undo state, or to a singleton group."""
@@ -446,6 +509,28 @@ class MockBinaryView:
             before=before,
             after=type_str,
         )
+
+    @property
+    def address_comments(self) -> dict[int, str]:
+        return dict(self._address_comments)
+
+    def set_comment_at(self, addr: int, text: str) -> None:
+        before = self._address_comments.get(addr, "")
+        if text:
+            self._address_comments[addr] = text
+        else:
+            self._address_comments.pop(addr, None)
+        self._record_undo(
+            "comment",
+            scope="global",
+            func_start=None,
+            addr=addr,
+            before=before,
+            after=text,
+        )
+
+    def get_comment_at(self, addr: int) -> str:
+        return self._address_comments.get(addr, "")
 
     def get_type_by_name(self, name: str) -> str | None:
         return self.user_types.get(str(name))

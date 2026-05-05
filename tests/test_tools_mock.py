@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from binja_mcp.tools import comments as t_comments
 from binja_mcp.tools import decompile as t_decompile
 from binja_mcp.tools import functions as t_functions
 from binja_mcp.tools import info as t_info
@@ -801,6 +802,161 @@ class TestTypes:
         assert "C-style" in err.extra["hint"] or "declaration" in err.extra["hint"]
 
 
+# --- comments ----------------------------------------------------------------
+
+
+class TestComments:
+    def test_set_and_get_global(self, ctx, open_id):
+        funcs = t_functions.list_functions(open_id, ctx, limit=1)
+        addr = funcs["items"][0]["start"]
+
+        result = t_comments.set_comment(open_id, addr, "global note", ctx)
+        assert result["scope"] == "global"
+        assert result["address"] == addr
+        assert result["text"] == "global note"
+
+        got = t_comments.get_comment(open_id, addr, ctx)
+        assert got["text"] == "global note"
+        assert got["scope"] == "global"
+
+    def test_get_returns_none_when_absent(self, ctx, open_id):
+        funcs = t_functions.list_functions(open_id, ctx, limit=1)
+        addr = funcs["items"][0]["start"]
+        got = t_comments.get_comment(open_id, addr, ctx)
+        assert got["text"] is None
+
+    def test_set_and_get_function_scoped(self, ctx, open_id):
+        funcs = t_functions.list_functions(open_id, ctx, limit=1)
+        fname = funcs["items"][0]["name"]
+        addr = funcs["items"][0]["start"]
+
+        result = t_comments.set_comment(
+            open_id, addr, "fn note", ctx, scope="function", function=fname
+        )
+        assert result["scope"] == "function"
+
+        got = t_comments.get_comment(open_id, addr, ctx, scope="function", function=fname)
+        assert got["text"] == "fn note"
+        # Global scope at same addr should be empty (independent stores)
+        got_global = t_comments.get_comment(open_id, addr, ctx)
+        assert got_global["text"] is None
+
+    def test_list_global_only(self, ctx, open_id):
+        funcs = t_functions.list_functions(open_id, ctx, limit=2)
+        a1 = funcs["items"][0]["start"]
+        a2 = funcs["items"][1]["start"]
+        t_comments.set_comment(open_id, a1, "g1", ctx)
+        t_comments.set_comment(open_id, a2, "g2", ctx)
+
+        result = t_comments.list_comments(open_id, ctx, scope="global")
+        assert result["total"] == 2
+        texts = {it["text"] for it in result["items"]}
+        assert texts == {"g1", "g2"}
+        assert all(it["scope"] == "global" for it in result["items"])
+
+    def test_list_function_only(self, ctx, open_id):
+        funcs = t_functions.list_functions(open_id, ctx, limit=1)
+        fname = funcs["items"][0]["name"]
+        addr = funcs["items"][0]["start"]
+        t_comments.set_comment(open_id, addr, "fn1", ctx, scope="function", function=fname)
+
+        result = t_comments.list_comments(open_id, ctx, scope="function", function=fname)
+        assert result["total"] == 1
+        assert result["items"][0]["scope"] == "function"
+        assert result["items"][0]["function"] == fname
+
+    def test_list_all_combines_scopes(self, ctx, open_id):
+        funcs = t_functions.list_functions(open_id, ctx, limit=2)
+        f1 = funcs["items"][0]
+        f2 = funcs["items"][1]
+        t_comments.set_comment(open_id, f1["start"], "g", ctx)
+        t_comments.set_comment(
+            open_id, f2["start"], "fn", ctx, scope="function", function=f2["name"]
+        )
+
+        result = t_comments.list_comments(open_id, ctx, scope="all")
+        assert result["total"] == 2
+        scopes = {it["scope"] for it in result["items"]}
+        assert scopes == {"global", "function"}
+
+    def test_remove_existing(self, ctx, open_id):
+        funcs = t_functions.list_functions(open_id, ctx, limit=1)
+        addr = funcs["items"][0]["start"]
+        t_comments.set_comment(open_id, addr, "doomed", ctx)
+
+        result = t_comments.remove_comment(open_id, addr, ctx)
+        assert result["removed"] is True
+        assert t_comments.get_comment(open_id, addr, ctx)["text"] is None
+
+    def test_remove_missing_returns_false(self, ctx, open_id):
+        funcs = t_functions.list_functions(open_id, ctx, limit=1)
+        addr = funcs["items"][0]["start"]
+        result = t_comments.remove_comment(open_id, addr, ctx)
+        assert result["removed"] is False
+
+    def test_undo_round_trip_global(self, ctx, open_id):
+        funcs = t_functions.list_functions(open_id, ctx, limit=1)
+        addr = funcs["items"][0]["start"]
+        t_comments.set_comment(open_id, addr, "before-undo", ctx)
+        assert t_comments.get_comment(open_id, addr, ctx)["text"] == "before-undo"
+
+        t_undo.undo(open_id, ctx)
+        assert t_comments.get_comment(open_id, addr, ctx)["text"] is None
+
+        t_undo.redo(open_id, ctx)
+        assert t_comments.get_comment(open_id, addr, ctx)["text"] == "before-undo"
+
+    def test_undo_round_trip_function(self, ctx, open_id):
+        funcs = t_functions.list_functions(open_id, ctx, limit=1)
+        fname = funcs["items"][0]["name"]
+        addr = funcs["items"][0]["start"]
+        t_comments.set_comment(open_id, addr, "fn-undo", ctx, scope="function", function=fname)
+        assert (
+            t_comments.get_comment(open_id, addr, ctx, scope="function", function=fname)["text"]
+            == "fn-undo"
+        )
+
+        t_undo.undo(open_id, ctx)
+        assert (
+            t_comments.get_comment(open_id, addr, ctx, scope="function", function=fname)["text"]
+            is None
+        )
+
+    def test_invalid_scope_set_raises(self, ctx, open_id):
+        from binja_mcp.errors import COMMENT_INVALID_SCOPE, BinjaError
+
+        with pytest.raises(BinjaError) as exc_info:
+            t_comments.set_comment(open_id, "0x1000", "x", ctx, scope="bogus")
+        assert exc_info.value.code == COMMENT_INVALID_SCOPE
+
+    def test_invalid_scope_list_raises(self, ctx, open_id):
+        from binja_mcp.errors import COMMENT_INVALID_SCOPE, BinjaError
+
+        with pytest.raises(BinjaError) as exc_info:
+            t_comments.list_comments(open_id, ctx, scope="nope")
+        assert exc_info.value.code == COMMENT_INVALID_SCOPE
+
+    def test_function_scope_without_function_arg_raises(self, ctx, open_id):
+        with pytest.raises(ValueError, match="requires a function argument"):
+            t_comments.set_comment(open_id, "0x1000", "x", ctx, scope="function")
+
+    def test_function_scope_unknown_function_raises(self, ctx, open_id):
+        from binja_mcp.errors import FUNCTION_NOT_FOUND, BinjaError
+
+        with pytest.raises(BinjaError) as exc_info:
+            t_comments.set_comment(
+                open_id, "0x1000", "x", ctx, scope="function", function="no_such_fn"
+            )
+        assert exc_info.value.code == FUNCTION_NOT_FOUND
+
+    def test_set_empty_text_clears(self, ctx, open_id):
+        funcs = t_functions.list_functions(open_id, ctx, limit=1)
+        addr = funcs["items"][0]["start"]
+        t_comments.set_comment(open_id, addr, "to clear", ctx)
+        t_comments.set_comment(open_id, addr, "", ctx)
+        assert t_comments.get_comment(open_id, addr, ctx)["text"] is None
+
+
 # --- registry sanity --------------------------------------------------------
 
 
@@ -832,6 +988,10 @@ def test_registry_contains_all_core_tools():
         "define_data_var",
         "get_type",
         "define_type",
+        "set_comment",
+        "get_comment",
+        "list_comments",
+        "remove_comment",
     }
     assert expected.issubset(names), f"missing: {expected - names}"
-    assert len(names) == 23, f"expected 23 tools, got {len(names)}: {sorted(names)}"
+    assert len(names) == 27, f"expected 27 tools, got {len(names)}: {sorted(names)}"
