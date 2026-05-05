@@ -187,6 +187,21 @@ Re-apply the most recently undone group.
 Returns `{"redone": bool, "remaining": int|null}`. `remaining` is `null` on
 real BN (redo stack not exposed).
 
+## v0.4 — Call graph
+
+### `get_callers(binary_id, addr_or_name, offset=0, limit=100)`
+List call sites that call into a function. Each item is `{"address", "function": <summary>}`,
+where `address` is the call instruction in the caller. Multiple sites from one caller produce
+multiple items.
+
+### `get_callees(binary_id, addr_or_name, offset=0, limit=100)`
+List outgoing call sites from a function. Each item is `{"address", "target": <summary>|null}`,
+where `address` is the call site in the source function and `target` is the resolved callee
+(or `null` for indirect calls).
+
+### `get_call_sites(binary_id, addr_or_name, offset=0, limit=100)`
+Raw list of call-site addresses inside a function: `{"items": [{"address"}], ...}`.
+
 ## Strings
 
 ### `search_strings(binary_id, pattern=None, regex=False, case_sensitive=True, offset=0, limit=100)`

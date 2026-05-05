@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from binja_mcp.tools import callgraph as t_callgraph
 from binja_mcp.tools import decompile as t_decompile
 from binja_mcp.tools import functions as t_functions
 from binja_mcp.tools import info as t_info
@@ -236,6 +237,123 @@ class TestXrefs:
         addr = funcs["items"][0]["start"]
         result = t_xrefs.get_xrefs_to(open_id, addr, ctx)
         assert result["target_address"] == addr
+
+
+# --- callgraph ---------------------------------------------------------------
+
+
+class TestCallgraph:
+    """Mock backend wires: main -> helper_func + decode; helper_func -> encrypt;
+    decode has one indirect call site (no resolved target)."""
+
+    # ---- get_callers --------------------------------------------------------
+
+    def test_callers_helper_includes_main(self, ctx, open_id):
+        result = t_callgraph.get_callers(open_id, "helper_func", ctx)
+        assert result["target"] == "helper_func"
+        assert any(it["function"]["name"] == "main" for it in result["items"])
+        # caller call-site address must be a hex string
+        assert all(it["address"].startswith("0x") for it in result["items"])
+
+    def test_callers_by_address(self, ctx, open_id, supervisor):
+        bv = supervisor.get(open_id).bv
+        helper = bv.get_function_by_name("helper_func")
+        result = t_callgraph.get_callers(open_id, f"0x{helper.start:x}", ctx)
+        assert result["target_address"] == f"0x{helper.start:x}"
+        assert result["total"] >= 1
+
+    def test_callers_function_with_no_refs(self, ctx, open_id, supervisor):
+        bv = supervisor.get(open_id).bv
+        encrypt = bv.get_function_by_name("encrypt")
+        # Clear all xrefs to encrypt to simulate "no callers"
+        bv._xrefs_to[encrypt.start] = []
+        result = t_callgraph.get_callers(open_id, "encrypt", ctx)
+        assert result["items"] == []
+        assert result["total"] == 0
+
+    def test_callers_unknown_function_raises(self, ctx, open_id):
+        from binja_mcp.errors import FUNCTION_NOT_FOUND, BinjaError
+
+        with pytest.raises(BinjaError) as exc_info:
+            t_callgraph.get_callers(open_id, "no_such_func_xyz", ctx)
+        assert exc_info.value.code == FUNCTION_NOT_FOUND
+
+    def test_callers_pagination(self, ctx, open_id, supervisor):
+        bv = supervisor.get(open_id).bv
+        from binja_mcp.mock_backend import MockReference
+
+        helper = bv.get_function_by_name("helper_func")
+        main_f = bv.get_function_by_name("main")
+        # Push enough refs to test offset/limit
+        bv._xrefs_to[helper.start] = [
+            MockReference(address=main_f.start + 0x20 + i, function_name="main", function=main_f)
+            for i in range(5)
+        ]
+        page1 = t_callgraph.get_callers(open_id, "helper_func", ctx, offset=0, limit=2)
+        page2 = t_callgraph.get_callers(open_id, "helper_func", ctx, offset=2, limit=10)
+        assert page1["total"] == 5
+        assert len(page1["items"]) == 2
+        assert page1["has_more"] is True
+        assert len(page2["items"]) == 3
+        assert page2["has_more"] is False
+
+    # ---- get_callees --------------------------------------------------------
+
+    def test_callees_main_has_direct_targets(self, ctx, open_id):
+        result = t_callgraph.get_callees(open_id, "main", ctx)
+        assert result["source"] == "main"
+        targets = {it["target"]["name"] for it in result["items"] if it["target"]}
+        assert "helper_func" in targets
+        assert "decode" in targets
+
+    def test_callees_indirect_yields_target_none(self, ctx, open_id):
+        result = t_callgraph.get_callees(open_id, "decode", ctx)
+        # decode has exactly one site with no resolved callee
+        assert result["total"] == 1
+        assert result["items"][0]["target"] is None
+        assert result["items"][0]["address"].startswith("0x")
+
+    def test_callees_function_with_no_call_sites(self, ctx, open_id):
+        result = t_callgraph.get_callees(open_id, "encrypt", ctx)
+        assert result["items"] == []
+        assert result["total"] == 0
+
+    def test_callees_unknown_function_raises(self, ctx, open_id):
+        from binja_mcp.errors import FUNCTION_NOT_FOUND, BinjaError
+
+        with pytest.raises(BinjaError) as exc_info:
+            t_callgraph.get_callees(open_id, "no_such_func_xyz", ctx)
+        assert exc_info.value.code == FUNCTION_NOT_FOUND
+
+    # ---- get_call_sites -----------------------------------------------------
+
+    def test_call_sites_main_has_two(self, ctx, open_id, supervisor):
+        result = t_callgraph.get_call_sites(open_id, "main", ctx)
+        bv = supervisor.get(open_id).bv
+        main_f = bv.get_function_by_name("main")
+        assert result["total"] == 2
+        for it in result["items"]:
+            site = int(it["address"], 16)
+            assert main_f.start <= site < main_f.end
+
+    def test_call_sites_function_with_none(self, ctx, open_id):
+        result = t_callgraph.get_call_sites(open_id, "encrypt", ctx)
+        assert result["items"] == []
+        assert result["total"] == 0
+
+    def test_call_sites_unknown_function_raises(self, ctx, open_id):
+        from binja_mcp.errors import FUNCTION_NOT_FOUND, BinjaError
+
+        with pytest.raises(BinjaError) as exc_info:
+            t_callgraph.get_call_sites(open_id, "no_such_func_xyz", ctx)
+        assert exc_info.value.code == FUNCTION_NOT_FOUND
+
+    def test_call_sites_resolves_by_address(self, ctx, open_id, supervisor):
+        bv = supervisor.get(open_id).bv
+        main_f = bv.get_function_by_name("main")
+        result = t_callgraph.get_call_sites(open_id, f"0x{main_f.start:x}", ctx)
+        assert result["source_address"] == f"0x{main_f.start:x}"
+        assert result["total"] == 2
 
 
 # --- strings -----------------------------------------------------------------
@@ -832,6 +950,9 @@ def test_registry_contains_all_core_tools():
         "define_data_var",
         "get_type",
         "define_type",
+        "get_callers",
+        "get_callees",
+        "get_call_sites",
     }
     assert expected.issubset(names), f"missing: {expected - names}"
-    assert len(names) == 23, f"expected 23 tools, got {len(names)}: {sorted(names)}"
+    assert len(names) == 26, f"expected 26 tools, got {len(names)}: {sorted(names)}"

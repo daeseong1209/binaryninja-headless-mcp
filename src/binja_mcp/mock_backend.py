@@ -61,6 +61,15 @@ class MockSection:
 class MockReference:
     address: int
     function_name: str | None = None
+    # Real BN ReferenceSource exposes .function — populate for callgraph callers.
+    function: MockFunction | None = None
+
+
+@dataclass
+class MockCallSite:
+    """Mirrors real BN's call_site shape; only .address is consumed by tools."""
+
+    address: int
 
 
 @dataclass
@@ -85,6 +94,7 @@ class MockFunction:
     _mlil: str = "// mock MLIL\n"
     _llil: str = "// mock LLIL\n"
     _disasm: str = "nop\n"
+    call_sites: list[MockCallSite] = field(default_factory=list)
 
     @property
     def hlil(self) -> str:
@@ -129,6 +139,8 @@ class MockBinaryView:
     segments: list[MockSegment] = field(default_factory=list)
     sections: dict[str, MockSection] = field(default_factory=dict)
     _xrefs_to: dict[int, list[MockReference]] = field(default_factory=dict)
+    # call_site_addr -> list of resolved callee start addresses (empty == indirect)
+    _callees_map: dict[int, list[int]] = field(default_factory=dict)
     data_vars: dict[int, MockDataVariable] = field(default_factory=dict)
     user_types: dict[str, str] = field(default_factory=dict)
     _undo_stack: list[dict] = field(default_factory=list, init=False, repr=False, compare=False)
@@ -260,6 +272,62 @@ class MockBinaryView:
                 is_export=True,
             )
         )
+
+        # ---- Callgraph wiring (added in v0.4) -------------------------------
+        # Backfill .function on the seeded _start xrefs so get_callers can
+        # synthesise a function summary; previous shape only had function_name.
+        start_func = self.get_function_by_name("_start")
+        if start_func is not None:
+            for refs in self._xrefs_to.values():
+                for r in refs:
+                    if r.function is None and r.function_name == "_start":
+                        r.function = start_func
+
+        # Layer a small call graph onto the existing 7 mock functions:
+        #   main -> helper_func (callsite at main.start + 0x4)
+        #   main -> decode      (callsite at main.start + 0x10)
+        #   helper_func -> encrypt (callsite at helper_func.start + 0x8)
+        #   decode -> indirect (callsite at decode.start + 0x4, no resolved target)
+        # encrypt has no outgoing calls; init has no outgoing calls.
+        main_f = self.get_function_by_name("main")
+        helper_f = self.get_function_by_name("helper_func")
+        encrypt_f = self.get_function_by_name("encrypt")
+        decode_f = self.get_function_by_name("decode")
+        if main_f and helper_f and encrypt_f and decode_f:
+            site_main_to_helper = main_f.start + 0x4
+            site_main_to_decode = main_f.start + 0x10
+            site_helper_to_encrypt = helper_f.start + 0x8
+            site_decode_indirect = decode_f.start + 0x4
+
+            main_f.call_sites = [
+                MockCallSite(address=site_main_to_helper),
+                MockCallSite(address=site_main_to_decode),
+            ]
+            helper_f.call_sites = [MockCallSite(address=site_helper_to_encrypt)]
+            decode_f.call_sites = [MockCallSite(address=site_decode_indirect)]
+
+            self._callees_map[site_main_to_helper] = [helper_f.start]
+            self._callees_map[site_main_to_decode] = [decode_f.start]
+            self._callees_map[site_helper_to_encrypt] = [encrypt_f.start]
+            self._callees_map[site_decode_indirect] = []  # indirect
+
+            self._xrefs_to.setdefault(helper_f.start, []).append(
+                MockReference(
+                    address=site_main_to_helper, function_name="main", function=main_f
+                )
+            )
+            self._xrefs_to.setdefault(decode_f.start, []).append(
+                MockReference(
+                    address=site_main_to_decode, function_name="main", function=main_f
+                )
+            )
+            self._xrefs_to.setdefault(encrypt_f.start, []).append(
+                MockReference(
+                    address=site_helper_to_encrypt,
+                    function_name="helper_func",
+                    function=helper_f,
+                )
+            )
 
     # Undo / redo API surface --------------------------------------------------
 
@@ -514,6 +582,10 @@ class MockBinaryView:
 
     def get_code_refs(self, addr: int) -> list[MockReference]:
         return list(self._xrefs_to.get(addr, []))
+
+    def get_callees(self, call_site_addr: int) -> list[int]:
+        """Return resolved callee start addresses for a call site (empty == indirect)."""
+        return list(self._callees_map.get(call_site_addr, []))
 
     def get_strings(self) -> list[MockString]:
         return list(self.strings)
