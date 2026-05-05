@@ -6,6 +6,7 @@ The server.py side then calls registry.register_all(mcp) to wire them up.
 
 from . import (
     decompile,  # noqa: F401
+    function_vars,  # noqa: F401
     functions,  # noqa: F401
     info,  # noqa: F401
     lifecycle,  # noqa: F401

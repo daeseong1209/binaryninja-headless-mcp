@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from binja_mcp.tools import decompile as t_decompile
+from binja_mcp.tools import function_vars as t_function_vars
 from binja_mcp.tools import functions as t_functions
 from binja_mcp.tools import info as t_info
 from binja_mcp.tools import lifecycle as t_lifecycle
@@ -801,6 +802,213 @@ class TestTypes:
         assert "C-style" in err.extra["hint"] or "declaration" in err.extra["hint"]
 
 
+# --- function variables ------------------------------------------------------
+
+
+class TestFunctionVars:
+    def test_list_returns_paginated_envelope(self, ctx, open_id):
+        funcs = t_functions.list_functions(open_id, ctx, limit=10)
+        target = next(it for it in funcs["items"] if it["name"] == "compute")
+        result = t_function_vars.list_function_variables(open_id, target["start"], ctx)
+        assert "items" in result
+        assert "total" in result
+        assert "offset" in result
+        assert "limit" in result
+        assert result["total"] >= 1
+        for item in result["items"]:
+            assert {"name", "type", "kind", "index", "storage"} <= set(item)
+            assert item["kind"] in ("parameter", "local")
+
+    def test_list_by_function_name(self, ctx, open_id):
+        result = t_function_vars.list_function_variables(open_id, "compute", ctx)
+        assert result["total"] >= 1
+
+    def test_list_unknown_function_raises(self, ctx, open_id):
+        from binja_mcp.errors import FUNCTION_NOT_FOUND, BinjaError
+
+        with pytest.raises(BinjaError) as exc_info:
+            t_function_vars.list_function_variables(open_id, "no_such_func_xyz", ctx)
+        assert exc_info.value.code == FUNCTION_NOT_FOUND
+
+    def test_list_pagination_limits_items(self, ctx, open_id):
+        # compute (i=4) -> 1 param + 1 local = 2 vars (i%3=1, 1+i%2=1)
+        # We seed up to ~3 vars in some funcs. Use offset to walk.
+        page1 = t_function_vars.list_function_variables(open_id, "encrypt", ctx, limit=1)
+        assert len(page1["items"]) == 1
+        # if there are more items, offset=1 returns the next
+        if page1["has_more"]:
+            page2 = t_function_vars.list_function_variables(
+                open_id, "encrypt", ctx, offset=1, limit=10
+            )
+            assert page2["offset"] == 1
+
+    def test_kind_filter_parameter_vs_local(self, ctx, open_id):
+        # main has param_count=1 (i=1, i%3=1) and 2 locals (1+i%2=2)
+        result = t_function_vars.list_function_variables(open_id, "main", ctx)
+        kinds = {it["kind"] for it in result["items"]}
+        assert "parameter" in kinds
+        assert "local" in kinds
+
+    def test_rename_variable_success(self, ctx, open_id, supervisor):
+        bv = supervisor.get(open_id).bv
+        # encrypt has at least one parameter (i=5 -> i%3=2 params)
+        listing = t_function_vars.list_function_variables(open_id, "encrypt", ctx)
+        first = listing["items"][0]
+        old_name = first["name"]
+
+        result = t_function_vars.rename_variable(
+            open_id, "encrypt", old_name, "RENAMED_VAR", ctx
+        )
+        assert result["before"] == old_name
+        assert result["after"] == "RENAMED_VAR"
+        assert result["function"] == "encrypt"
+        assert result["kind"] in ("parameter", "local")
+
+        # The new name shows up in the listing
+        listing2 = t_function_vars.list_function_variables(open_id, "encrypt", ctx)
+        names_after = {it["name"] for it in listing2["items"]}
+        assert "RENAMED_VAR" in names_after
+
+        # Undo entry recorded
+        assert len(bv._undo_stack) >= 1
+        entry = bv._undo_stack[-1]["entries"][-1]
+        assert entry["kind"] == "var_rename"
+
+    def test_rename_undo_round_trip(self, ctx, open_id):
+        listing = t_function_vars.list_function_variables(open_id, "encrypt", ctx)
+        original = listing["items"][0]["name"]
+        t_function_vars.rename_variable(
+            open_id, "encrypt", original, "TEMP_RENAME", ctx
+        )
+
+        # Undo
+        t_undo.undo(open_id, ctx)
+        listing_after = t_function_vars.list_function_variables(open_id, "encrypt", ctx)
+        names = {it["name"] for it in listing_after["items"]}
+        assert original in names
+        assert "TEMP_RENAME" not in names
+
+        # Redo restores the rename
+        t_undo.redo(open_id, ctx)
+        listing_redo = t_function_vars.list_function_variables(open_id, "encrypt", ctx)
+        names_redo = {it["name"] for it in listing_redo["items"]}
+        assert "TEMP_RENAME" in names_redo
+
+    def test_rename_unknown_variable_raises(self, ctx, open_id):
+        from binja_mcp.errors import VARIABLE_NOT_FOUND, BinjaError
+
+        with pytest.raises(BinjaError) as exc_info:
+            t_function_vars.rename_variable(
+                open_id, "main", "no_such_var", "X", ctx
+            )
+        assert exc_info.value.code == VARIABLE_NOT_FOUND
+
+    def test_rename_unknown_function_raises(self, ctx, open_id):
+        from binja_mcp.errors import FUNCTION_NOT_FOUND, BinjaError
+
+        with pytest.raises(BinjaError) as exc_info:
+            t_function_vars.rename_variable(
+                open_id, "no_such_func", "v", "X", ctx
+            )
+        assert exc_info.value.code == FUNCTION_NOT_FOUND
+
+    def test_rename_empty_new_name_raises(self, ctx, open_id):
+        listing = t_function_vars.list_function_variables(open_id, "encrypt", ctx)
+        var_name = listing["items"][0]["name"]
+        with pytest.raises(ValueError):
+            t_function_vars.rename_variable(open_id, "encrypt", var_name, "", ctx)
+
+    def test_set_variable_type_success(self, ctx, open_id, supervisor):
+        bv = supervisor.get(open_id).bv
+        listing = t_function_vars.list_function_variables(open_id, "encrypt", ctx)
+        var_name = listing["items"][0]["name"]
+        before_type = listing["items"][0]["type"]
+
+        result = t_function_vars.set_variable_type(
+            open_id, "encrypt", var_name, "uint64_t", ctx
+        )
+        assert result["var_name"] == var_name
+        assert result["before_type"] == before_type
+        assert result["after_type"] == "uint64_t"
+        assert result["function"] == "encrypt"
+
+        # Listing reflects new type
+        listing2 = t_function_vars.list_function_variables(open_id, "encrypt", ctx)
+        match = next(it for it in listing2["items"] if it["name"] == var_name)
+        assert match["type"] == "uint64_t"
+
+        # Undo entry recorded
+        assert bv._undo_stack[-1]["entries"][-1]["kind"] == "var_retype"
+
+    def test_set_variable_type_undo_reverts(self, ctx, open_id):
+        listing = t_function_vars.list_function_variables(open_id, "encrypt", ctx)
+        var_name = listing["items"][0]["name"]
+        before_type = listing["items"][0]["type"]
+
+        t_function_vars.set_variable_type(
+            open_id, "encrypt", var_name, "uint64_t", ctx
+        )
+        t_undo.undo(open_id, ctx)
+
+        listing_after = t_function_vars.list_function_variables(open_id, "encrypt", ctx)
+        match = next(it for it in listing_after["items"] if it["name"] == var_name)
+        assert match["type"] == before_type
+
+    def test_set_variable_type_invalid_raises(self, ctx, open_id):
+        from binja_mcp.errors import TYPE_PARSE_ERROR, BinjaError
+
+        listing = t_function_vars.list_function_variables(open_id, "encrypt", ctx)
+        var_name = listing["items"][0]["name"]
+        with pytest.raises(BinjaError) as exc_info:
+            t_function_vars.set_variable_type(
+                open_id, "encrypt", var_name, "struct {int x;", ctx
+            )
+        assert exc_info.value.code == TYPE_PARSE_ERROR
+
+    def test_set_variable_type_unknown_var_raises(self, ctx, open_id):
+        from binja_mcp.errors import VARIABLE_NOT_FOUND, BinjaError
+
+        with pytest.raises(BinjaError) as exc_info:
+            t_function_vars.set_variable_type(
+                open_id, "main", "no_such_var", "int", ctx
+            )
+        assert exc_info.value.code == VARIABLE_NOT_FOUND
+
+    def test_set_variable_type_empty_type_str_raises(self, ctx, open_id):
+        listing = t_function_vars.list_function_variables(open_id, "encrypt", ctx)
+        var_name = listing["items"][0]["name"]
+        with pytest.raises(ValueError):
+            t_function_vars.set_variable_type(open_id, "encrypt", var_name, "", ctx)
+
+    def test_bulk_under_begin_commit_undo_atomic(self, ctx, open_id, supervisor):
+        bv = supervisor.get(open_id).bv
+        listing = t_function_vars.list_function_variables(open_id, "encrypt", ctx)
+        var_name = listing["items"][0]["name"]
+
+        state = t_undo.begin_undo(open_id, ctx)["state_id"]
+        t_function_vars.rename_variable(
+            open_id, "encrypt", var_name, "BULK_NAME", ctx
+        )
+        t_function_vars.set_variable_type(
+            open_id, "encrypt", "BULK_NAME", "uint32_t", ctx
+        )
+        t_undo.commit_undo(open_id, state, ctx)
+
+        # The whole bulk operation lives in one undo group
+        assert len(bv._undo_stack) >= 1
+        last_group = bv._undo_stack[-1]
+        kinds = [e["kind"] for e in last_group["entries"]]
+        assert "var_rename" in kinds
+        assert "var_retype" in kinds
+
+        # A single undo() reverts both
+        t_undo.undo(open_id, ctx)
+        listing_after = t_function_vars.list_function_variables(open_id, "encrypt", ctx)
+        names = {it["name"] for it in listing_after["items"]}
+        assert "BULK_NAME" not in names
+        assert var_name in names
+
+
 # --- registry sanity --------------------------------------------------------
 
 
@@ -832,6 +1040,9 @@ def test_registry_contains_all_core_tools():
         "define_data_var",
         "get_type",
         "define_type",
+        "list_function_variables",
+        "rename_variable",
+        "set_variable_type",
     }
     assert expected.issubset(names), f"missing: {expected - names}"
-    assert len(names) == 23, f"expected 23 tools, got {len(names)}: {sorted(names)}"
+    assert len(names) == 26, f"expected 26 tools, got {len(names)}: {sorted(names)}"

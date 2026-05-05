@@ -1,6 +1,6 @@
-# Tools Reference (v0.3.1)
+# Tools Reference (v0.4)
 
-**23 tools** are registered across 9 modules. All tools accept a `binary_id`
+**26 tools** are registered across 10 modules. All tools accept a `binary_id`
 returned by `open_binary` (except the lifecycle tools themselves). Errors raise
 standard Python exceptions, which FastMCP converts into MCP `isError: true`
 responses with the original message.
@@ -186,6 +186,38 @@ new change after `undo` clears the redo stack (standard Binary Ninja behavior).
 Re-apply the most recently undone group.
 Returns `{"redone": bool, "remaining": int|null}`. `remaining` is `null` on
 real BN (redo stack not exposed).
+
+## v0.4 — Function variables
+
+### `list_function_variables(binary_id, function, offset=0, limit=100)`
+List parameters and locals of a function (paginated).
+- **function** — function name or address (hex string / int).
+- Items: `{"name", "type", "kind": "parameter"|"local", "index", "storage"}`.
+  Variables are returned with parameters first, then remaining locals,
+  deduplicated by storage. `kind` is authoritative — set from membership in
+  `func.parameter_vars`.
+- Response uses the standard `paginate()` envelope.
+
+### `rename_variable(binary_id, function, var_name, new_name)`
+Rename a parameter or local variable by its current name.
+- Raises `BinjaError(VARIABLE_NOT_FOUND)` if `var_name` doesn't match any
+  variable in the function.
+- Raises `BinjaError(FUNCTION_NOT_FOUND)` for unknown `function`.
+- Records an undo entry; use `undo()` to revert.
+- Response: `{"function": "...", "before": "old_name", "after": "new_name", "kind": "parameter"|"local"}`.
+- **Name uniqueness**: search returns the first match by name. When multiple
+  variables share the same name (rare), the result is not deterministic;
+  rename ambiguous variables uniquely before further operations.
+
+### `set_variable_type(binary_id, function, var_name, type_str)`
+Set the type of a parameter or local variable.
+- **type_str** — any string accepted by `bv.parse_type_string` (e.g. `"uint64_t"`, `"char*"`).
+- Raises `BinjaError(TYPE_PARSE_ERROR)` on bad syntax.
+- Raises `BinjaError(VARIABLE_NOT_FOUND)` when `var_name` doesn't match.
+- Records an undo entry. On real BN, the underlying `Variable.type` setter
+  expects a `Type` object; the tool parses `type_str` first and passes the
+  resulting `Type` (mirroring `define_data_var`).
+- Response: `{"function": "...", "var_name": "...", "before_type": "...", "after_type": "..."}`.
 
 ## Strings
 

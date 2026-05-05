@@ -75,6 +75,14 @@ class MockString:
 
 
 @dataclass
+class MockVariable:
+    name: str
+    type_str: str = "int"
+    storage: int = 0
+    kind: str = "local"  # "parameter" or "local"
+
+
+@dataclass
 class MockFunction:
     name: str
     start: int
@@ -85,6 +93,7 @@ class MockFunction:
     _mlil: str = "// mock MLIL\n"
     _llil: str = "// mock LLIL\n"
     _disasm: str = "nop\n"
+    variables: list[MockVariable] = field(default_factory=list)
 
     @property
     def hlil(self) -> str:
@@ -97,6 +106,16 @@ class MockFunction:
     @property
     def llil(self) -> str:
         return self._llil
+
+    @property
+    def vars(self) -> list[MockVariable]:
+        """Alias for variables — parity with real BN's func.vars."""
+        return self.variables
+
+    @property
+    def parameter_vars(self) -> list[MockVariable]:
+        """Subset of variables whose kind is 'parameter'."""
+        return [v for v in self.variables if v.kind == "parameter"]
 
 
 @dataclass
@@ -151,17 +170,41 @@ class MockBinaryView:
         for i, name in enumerate(names):
             start = base + i * 0x40
             end = start + 0x30
+            # Seed each function with 1-2 params + 1-2 locals (~3 vars total).
+            # Param count varies (i % 3) so some functions have 0/1/2 params.
+            param_count = i % 3
+            local_count = 1 + (i % 2)  # 1 or 2 locals
+            mock_vars: list[MockVariable] = []
+            for p in range(param_count):
+                mock_vars.append(
+                    MockVariable(
+                        name=f"arg{p + 1}",
+                        type_str="int" if p == 0 else "char*",
+                        storage=-(p + 1) * 8,  # negative = register-like
+                        kind="parameter",
+                    )
+                )
+            for lo in range(local_count):
+                mock_vars.append(
+                    MockVariable(
+                        name=f"var_{lo + 1}",
+                        type_str="int64_t",
+                        storage=(lo + 1) * 8,  # positive = stack offset
+                        kind="local",
+                    )
+                )
             self.functions.append(
                 MockFunction(
                     name=name,
                     start=start,
                     end=end,
-                    parameter_count=i % 3,
+                    parameter_count=param_count,
                     basic_block_count=1 + (i % 4),
                     _hlil=f"// HLIL of {name}\nint {name}() {{ return {i}; }}\n",
                     _mlil=f"// MLIL of {name}\nreturn {i}\n",
                     _llil=f"// LLIL of {name}\nrax = {i}; ret\n",
                     _disasm=f"; {name}\nmov rax, {i}\nret\n",
+                    variables=mock_vars,
                 )
             )
             self.symbols.append(MockSymbol(name=name, address=start))
@@ -338,6 +381,20 @@ class MockBinaryView:
                 self.user_types.pop(type_name, None)
             else:
                 self.user_types[type_name] = before
+        elif kind in ("var_rename", "var_retype"):
+            func_addr = entry["func_addr"]
+            storage = entry["storage"]
+            before = entry["before"]
+            f = self.get_function_at(func_addr)
+            if f is None:
+                return
+            for v in f.variables:
+                if v.storage == storage:
+                    if kind == "var_rename":
+                        v.name = before
+                    else:
+                        v.type_str = before
+                    break
 
     def _reapply_entry(self, entry: dict) -> None:
         """Re-apply a single undo entry by restoring 'after' state."""
@@ -370,6 +427,20 @@ class MockBinaryView:
             type_name = entry["type_name"]
             after = entry["after"]
             self.user_types[type_name] = after
+        elif kind in ("var_rename", "var_retype"):
+            func_addr = entry["func_addr"]
+            storage = entry["storage"]
+            after = entry["after"]
+            f = self.get_function_at(func_addr)
+            if f is None:
+                return
+            for v in f.variables:
+                if v.storage == storage:
+                    if kind == "var_rename":
+                        v.name = after
+                    else:
+                        v.type_str = after
+                    break
 
     def _record_undo(self, kind: str, **payload) -> None:
         """Append an entry to the most recent open undo state, or to a singleton group."""
@@ -396,6 +467,44 @@ class MockBinaryView:
                 break
         self._record_undo("rename_function", addr=addr, before=old, after=new_name)
         return True
+
+    def rename_variable(self, func_addr: int, storage: int, new_name: str) -> bool:
+        """Rename the variable matching (func_addr, storage). Records undo."""
+        f = self.get_function_at(func_addr)
+        if f is None:
+            return False
+        for v in f.variables:
+            if v.storage == storage:
+                old = v.name
+                v.name = new_name
+                self._record_undo(
+                    "var_rename",
+                    func_addr=func_addr,
+                    storage=storage,
+                    before=old,
+                    after=new_name,
+                )
+                return True
+        return False
+
+    def retype_variable(self, func_addr: int, storage: int, new_type: str) -> bool:
+        """Retype the variable matching (func_addr, storage). Records undo."""
+        f = self.get_function_at(func_addr)
+        if f is None:
+            return False
+        for v in f.variables:
+            if v.storage == storage:
+                old = v.type_str
+                v.type_str = new_type
+                self._record_undo(
+                    "var_retype",
+                    func_addr=func_addr,
+                    storage=storage,
+                    before=old,
+                    after=new_type,
+                )
+                return True
+        return False
 
     def define_user_symbol(self, sym: object) -> None:
         """Accept a symbol-like object or dict and update the symbol list."""

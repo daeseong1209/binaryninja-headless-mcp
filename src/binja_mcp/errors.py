@@ -86,6 +86,7 @@ def undo_state_invalid(state_id: str) -> BinjaError:
 
 TYPE_PARSE_ERROR = "TYPE_PARSE_ERROR"
 SYMBOL_NOT_FOUND = "SYMBOL_NOT_FOUND"
+VARIABLE_NOT_FOUND = "VARIABLE_NOT_FOUND"
 
 
 def type_parse_error(source: str, original: str = "") -> BinjaError:
@@ -104,4 +105,13 @@ def symbol_not_found(target: Any) -> BinjaError:
         f"symbol not found: {target!r}",
         target=str(target),
         hint="use list_symbols to enumerate available symbols",
+    )
+
+
+def variable_not_found(name: str) -> BinjaError:
+    return BinjaError(
+        VARIABLE_NOT_FOUND,
+        f"variable not found: {name!r}",
+        name=str(name),
+        hint="use list_function_variables to enumerate parameters and locals",
     )

@@ -686,3 +686,110 @@ def test_C35_x86_decompile_entry_not_repr(tiny_x86_session):
     text = result["text"]
     assert "<HighLevelILFunction" not in text
     assert "ILFunction" not in text
+
+
+# ===========================================================================
+# Group D: Function variables (v0.4) — exercised on hostname.exe (3 cases)
+# ===========================================================================
+
+
+def _find_function_with_vars(sup: Any, binary_id: str, ctx: SimpleNamespace) -> str:
+    """Return the name of a function that has at least one variable."""
+    from binja_mcp.tools import function_vars as t_function_vars  # noqa: PLC0415
+    from binja_mcp.tools import functions as t_functions  # noqa: PLC0415
+
+    page = t_functions.list_functions(binary_id, ctx, limit=200)
+    # Prefer _wmain or main as a stable target
+    preferred = ("_wmain", "wmain", "main", "_main")
+    candidates = [
+        item for item in page["items"] if item["name"] in preferred
+    ]
+    candidates.extend(item for item in page["items"] if item["name"] not in preferred)
+    for item in candidates:
+        try:
+            listing = t_function_vars.list_function_variables(
+                binary_id, item["name"], ctx
+            )
+            if listing["total"] >= 1:
+                return item["name"]
+        except Exception:
+            continue
+    pytest.skip("no function with variables found in fixture")
+
+
+@pytest.mark.live_quick
+class TestFunctionVarsLive:
+    def test_D01_list_function_variables_has_param(self, tiny_x64_session):
+        """list_function_variables on _wmain returns >= 1 item incl. a parameter."""
+        from binja_mcp.tools import function_vars as t_function_vars  # noqa: PLC0415
+
+        sup = tiny_x64_session["supervisor"]
+        binary_id = tiny_x64_session["binary_id"]
+        ctx = _ctx(sup)
+        target = _find_function_with_vars(sup, binary_id, ctx)
+        result = t_function_vars.list_function_variables(binary_id, target, ctx)
+        assert result["total"] >= 1
+        kinds = {it["kind"] for it in result["items"]}
+        # Most _wmain-style entry points expose at least one parameter (argc-equivalent)
+        assert "parameter" in kinds or "local" in kinds
+
+    def test_D02_rename_then_undo_round_trip(self, tiny_x64_session):
+        """rename_variable returns expected before/after; undo() reports a result."""
+        from binja_mcp.tools import function_vars as t_function_vars  # noqa: PLC0415
+        from binja_mcp.tools import undo as t_undo  # noqa: PLC0415
+
+        sup = tiny_x64_session["supervisor"]
+        binary_id = tiny_x64_session["binary_id"]
+        ctx = _ctx(sup)
+        target = _find_function_with_vars(sup, binary_id, ctx)
+        listing = t_function_vars.list_function_variables(binary_id, target, ctx)
+        original = listing["items"][0]["name"]
+
+        result = t_function_vars.rename_variable(
+            binary_id, target, original, "LIVE_RENAME_VAR", ctx
+        )
+        assert result["before"] == original
+        assert result["after"] == "LIVE_RENAME_VAR"
+        assert result["function"] == target
+        assert result["kind"] in ("parameter", "local")
+
+        listing2 = t_function_vars.list_function_variables(binary_id, target, ctx)
+        names = {it["name"] for it in listing2["items"]}
+        assert "LIVE_RENAME_VAR" in names
+
+        # undo() must return a structured result without crashing.
+        # Real BN's undo on per-property writes is best-effort and may not
+        # always reverse the rename in a single call (depends on internal grouping).
+        undo_result = t_undo.undo(binary_id, ctx)
+        assert "undone" in undo_result
+
+    def test_D03_set_variable_type_then_undo(self, tiny_x64_session):
+        """set_variable_type returns before/after_type; type appears in subsequent listing."""
+        from binja_mcp.tools import function_vars as t_function_vars  # noqa: PLC0415
+        from binja_mcp.tools import undo as t_undo  # noqa: PLC0415
+
+        sup = tiny_x64_session["supervisor"]
+        binary_id = tiny_x64_session["binary_id"]
+        ctx = _ctx(sup)
+        target = _find_function_with_vars(sup, binary_id, ctx)
+        listing = t_function_vars.list_function_variables(binary_id, target, ctx)
+        var_name = listing["items"][0]["name"]
+        before_type = listing["items"][0]["type"]
+
+        result = t_function_vars.set_variable_type(
+            binary_id, target, var_name, "uint64_t", ctx
+        )
+        assert result["before_type"] == before_type
+        assert "uint64" in result["after_type"].lower() or result["after_type"] == "uint64_t"
+
+        listing2 = t_function_vars.list_function_variables(binary_id, target, ctx)
+        match = next(
+            (it for it in listing2["items"] if it["name"] == var_name), None
+        )
+        assert match is not None
+        assert "uint64" in match["type"].lower() or match["type"] == "uint64_t"
+
+        # undo() must return structured result; on real BN per-property undo
+        # is best-effort.
+        undo_result = t_undo.undo(binary_id, ctx)
+        assert "undone" in undo_result

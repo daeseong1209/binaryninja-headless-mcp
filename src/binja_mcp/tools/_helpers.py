@@ -10,7 +10,13 @@ import logging
 from contextlib import contextmanager
 from typing import Any
 
-from ..errors import binary_not_found, function_not_found, invalid_il_level, symbol_not_found
+from ..errors import (
+    binary_not_found,
+    function_not_found,
+    invalid_il_level,
+    symbol_not_found,
+    variable_not_found,
+)
 from ..session import Session
 from ..supervisor import BinaryNotFoundError, Supervisor
 from ..utils import parse_address
@@ -174,6 +180,59 @@ def find_function(bv: Any, addr_or_name: str | int) -> Any:
                 return func
 
     raise function_not_found(addr_or_name)
+
+
+def iter_function_variables(func: Any) -> list[Any]:
+    """Return parameters first, then locals (deduped by storage).
+
+    Real BN exposes ``func.parameter_vars`` plus ``func.vars`` (some versions
+    expose ``func.variables``); the mock backend mirrors both. A var present
+    in ``parameter_vars`` is also in ``vars``, so we dedupe by ``storage``.
+    """
+    out: list[Any] = []
+    seen: set[Any] = set()
+
+    params = getattr(func, "parameter_vars", None) or []
+    try:
+        for v in params:
+            key = getattr(v, "storage", None)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(v)
+    except TypeError:
+        pass
+
+    all_vars = getattr(func, "vars", None)
+    if all_vars is None:
+        all_vars = getattr(func, "variables", None) or []
+    try:
+        for v in all_vars:
+            key = getattr(v, "storage", None)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(v)
+    except TypeError:
+        pass
+
+    return out
+
+
+def find_variable(func: Any, name: str) -> Any:
+    """Locate a variable by name within a function. Mirrors find_function's style.
+
+    Searches parameters first, then locals. Returns the first match.
+    Raises BinjaError(VARIABLE_NOT_FOUND) if no variable carries that name.
+
+    Note: when multiple variables share the same name (rare), the first
+    one encountered is returned. Callers should rename ambiguous vars
+    uniquely before further operations.
+    """
+    for v in iter_function_variables(func):
+        if getattr(v, "name", None) == name:
+            return v
+    raise variable_not_found(name)
 
 
 def find_symbol(bv: Any, target: Any) -> Any:
