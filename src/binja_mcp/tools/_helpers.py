@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..errors import binary_not_found, function_not_found, invalid_il_level
+from ..errors import binary_not_found, function_not_found, invalid_il_level, symbol_not_found
 from ..session import Session
 from ..supervisor import BinaryNotFoundError, Supervisor
 from ..utils import parse_address
@@ -72,6 +72,39 @@ def find_function(bv: Any, addr_or_name: str | int) -> Any:
                 return func
 
     raise function_not_found(addr_or_name)
+
+
+def find_symbol(bv: Any, target: Any) -> Any:
+    """Find a symbol by address (int/hex string) or name. Sister to find_function.
+
+    Returns the first matching symbol or raises BinjaError(SYMBOL_NOT_FOUND).
+    """
+    # Address path
+    addr: int | None = None
+    try:
+        if isinstance(target, int):
+            addr = target
+        elif isinstance(target, str) and (
+            target.lower().startswith("0x") or target.isdigit()
+        ):
+            addr = parse_address(target)
+    except ValueError:
+        addr = None
+
+    syms = list(bv.get_symbols()) if hasattr(bv, "get_symbols") else []
+
+    if addr is not None:
+        for s in syms:
+            if getattr(s, "address", None) == addr:
+                return s
+
+    # Name path
+    name = target if isinstance(target, str) else str(target)
+    for s in syms:
+        if getattr(s, "name", None) == name or getattr(s, "full_name", None) == name:
+            return s
+
+    raise symbol_not_found(target)
 
 
 def function_to_summary(func: Any) -> dict[str, Any]:

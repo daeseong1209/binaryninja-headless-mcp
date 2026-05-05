@@ -100,6 +100,13 @@ class MockFunction:
 
 
 @dataclass
+class MockDataVariable:
+    address: int
+    type_str: str
+    name: str | None = None
+
+
+@dataclass
 class MockFile:
     filename: str
 
@@ -122,6 +129,8 @@ class MockBinaryView:
     segments: list[MockSegment] = field(default_factory=list)
     sections: dict[str, MockSection] = field(default_factory=dict)
     _xrefs_to: dict[int, list[MockReference]] = field(default_factory=dict)
+    data_vars: dict[int, MockDataVariable] = field(default_factory=dict)
+    user_types: dict[str, str] = field(default_factory=dict)
     _undo_stack: list[dict] = field(default_factory=list, init=False, repr=False, compare=False)
     _redo_stack: list[dict] = field(default_factory=list, init=False, repr=False, compare=False)
     _open_undo_states: dict[str, list] = field(
@@ -275,12 +284,92 @@ class MockBinaryView:
         self._open_undo_states.pop(state_id, None)
 
     def undo(self) -> None:
-        if self._undo_stack:
-            self._redo_stack.append(self._undo_stack.pop())
+        if not self._undo_stack:
+            return
+        group = self._undo_stack.pop()
+        for entry in reversed(group.get("entries", [])):
+            self._revert_entry(entry)
+        self._redo_stack.append(group)
 
     def redo(self) -> None:
-        if self._redo_stack:
-            self._undo_stack.append(self._redo_stack.pop())
+        if not self._redo_stack:
+            return
+        group = self._redo_stack.pop()
+        for entry in group.get("entries", []):
+            self._reapply_entry(entry)
+        self._undo_stack.append(group)
+
+    def _revert_entry(self, entry: dict) -> None:
+        """Revert a single undo entry by restoring 'before' state."""
+        kind = entry.get("kind")
+        if kind == "rename_function":
+            addr = entry["addr"]
+            before = entry["before"]
+            f = self.get_function_at(addr)
+            if f is not None and before is not None:
+                f.name = before
+            for s in self.symbols:
+                if s.address == addr and int(s.type) == int(MockSymbolType.FunctionSymbol):
+                    s.name = before
+                    break
+        elif kind == "define_user_symbol":
+            addr = entry["addr"]
+            before = entry["before"]
+            after = entry["after"]
+            for i, s in enumerate(self.symbols):
+                if s.address == addr and s.name == after:
+                    if before is None:
+                        del self.symbols[i]
+                    else:
+                        s.name = before
+                    break
+        elif kind == "define_user_data_var":
+            addr = entry["addr"]
+            before = entry["before"]
+            if before is None:
+                self.data_vars.pop(addr, None)
+            else:
+                type_str, name = before
+                self.data_vars[addr] = MockDataVariable(address=addr, type_str=type_str, name=name)
+        elif kind == "define_user_type":
+            type_name = entry["type_name"]
+            before = entry["before"]
+            if before is None:
+                self.user_types.pop(type_name, None)
+            else:
+                self.user_types[type_name] = before
+
+    def _reapply_entry(self, entry: dict) -> None:
+        """Re-apply a single undo entry by restoring 'after' state."""
+        kind = entry.get("kind")
+        if kind == "rename_function":
+            addr = entry["addr"]
+            after = entry["after"]
+            f = self.get_function_at(addr)
+            if f is not None:
+                f.name = after
+            for s in self.symbols:
+                if s.address == addr and int(s.type) == int(MockSymbolType.FunctionSymbol):
+                    s.name = after
+                    break
+        elif kind == "define_user_symbol":
+            addr = entry["addr"]
+            after = entry["after"]
+            sym_type = entry.get("sym_type", MockSymbolType.DataSymbol)
+            for s in self.symbols:
+                if s.address == addr:
+                    s.name = after
+                    return
+            self.symbols.append(MockSymbol(name=after, address=addr, type=sym_type))
+        elif kind == "define_user_data_var":
+            addr = entry["addr"]
+            after = entry["after"]
+            type_str, name = after
+            self.data_vars[addr] = MockDataVariable(address=addr, type_str=type_str, name=name)
+        elif kind == "define_user_type":
+            type_name = entry["type_name"]
+            after = entry["after"]
+            self.user_types[type_name] = after
 
     def _record_undo(self, kind: str, **payload) -> None:
         """Append an entry to the most recent open undo state, or to a singleton group."""
@@ -291,6 +380,114 @@ class MockBinaryView:
         else:
             self._undo_stack.append({"id": "auto", "entries": [entry]})
             self._redo_stack.clear()
+
+    # Write API — symbols / types / data vars ---------------------------------
+
+    def rename_function(self, addr: int, new_name: str) -> bool:
+        f = self.get_function_at(addr)
+        if f is None:
+            return False
+        old = f.name
+        f.name = new_name
+        # Keep corresponding FunctionSymbol in sync
+        for s in self.symbols:
+            if s.address == addr and int(s.type) == int(MockSymbolType.FunctionSymbol):
+                s.name = new_name
+                break
+        self._record_undo("rename_function", addr=addr, before=old, after=new_name)
+        return True
+
+    def define_user_symbol(self, sym: object) -> None:
+        """Accept a symbol-like object or dict and update the symbol list."""
+        if isinstance(sym, dict):
+            sym_type = sym.get("type")
+            addr = sym.get("address")
+            name = sym.get("name")
+        else:
+            sym_type = getattr(sym, "type", None)
+            addr = getattr(sym, "address", None)
+            name = getattr(sym, "name", None)
+        if addr is None or name is None:
+            return
+        before = None
+        for s in self.symbols:
+            if s.address == addr:
+                before = s.name
+                s.name = name
+                break
+        else:
+            self.symbols.append(
+                MockSymbol(name=name, address=addr, type=sym_type or MockSymbolType.DataSymbol)
+            )
+        self._record_undo("define_user_symbol", addr=addr, before=before, after=name)
+
+    def define_user_data_var(
+        self, address: int, var_type: object, name: str | None = None
+    ) -> MockDataVariable:
+        type_str = str(var_type) if not isinstance(var_type, str) else var_type
+        before = self.data_vars.get(address)
+        dv = MockDataVariable(address=address, type_str=type_str, name=name)
+        self.data_vars[address] = dv
+        self._record_undo(
+            "define_user_data_var",
+            addr=address,
+            before=(before.type_str, before.name) if before else None,
+            after=(type_str, name),
+        )
+        return dv
+
+    def define_user_type(self, name: object, type_obj: object) -> None:
+        type_str = str(type_obj) if not isinstance(type_obj, str) else type_obj
+        before = self.user_types.get(str(name))
+        self.user_types[str(name)] = type_str
+        self._record_undo(
+            "define_user_type",
+            type_name=str(name),
+            before=before,
+            after=type_str,
+        )
+
+    def get_type_by_name(self, name: str) -> str | None:
+        return self.user_types.get(str(name))
+
+    @property
+    def types(self) -> dict:
+        return dict(self.user_types)
+
+    def parse_type_string(self, s: str) -> tuple[str, str]:
+        """Mock parser: returns (type_str, '') or raises ValueError on bad syntax."""
+        s = s.strip()
+        if not s:
+            raise ValueError(f"invalid type: {s!r}")
+        # Detect unclosed braces as a basic syntax check
+        if s.count("{") != s.count("}"):
+            raise ValueError(f"invalid type: {s!r}")
+        return (s, "")
+
+    def parse_types_from_source(self, source: str) -> object:
+        """Mock: extract typedef/struct names. Returns object with .types dict."""
+        import re
+
+        types: dict[str, str] = {}
+        # typedef struct {...} Name; or struct Name {...};
+        for m in re.finditer(
+            r"(?:typedef\s+)?struct\s+(?:(\w+)\s*)?\{[^}]*\}\s*(\w+)?\s*;", source
+        ):
+            name = m.group(2) or m.group(1)
+            if name:
+                types[name] = m.group(0)
+        if not types:
+            # simple typedef X Y;
+            for m in re.finditer(r"typedef\s+\S+\s+(\w+)\s*;", source):
+                types[m.group(1)] = m.group(0)
+        if not types:
+            raise ValueError(f"no types found in source: {source[:80]!r}")
+
+        class _ParseResult:
+            def __init__(self, types_dict: dict) -> None:
+                self.types = types_dict
+
+        return _ParseResult(types)
 
     # API surface used by tools ------------------------------------------------
 

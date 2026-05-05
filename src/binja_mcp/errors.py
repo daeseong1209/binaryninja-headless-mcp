@@ -76,3 +76,26 @@ def undo_state_invalid(state_id: str) -> BinjaError:
             " commit_undo can be called only once per state"
         ),
     )
+
+
+TYPE_PARSE_ERROR = "TYPE_PARSE_ERROR"
+SYMBOL_NOT_FOUND = "SYMBOL_NOT_FOUND"
+
+
+def type_parse_error(source: str, original: str = "") -> BinjaError:
+    return BinjaError(
+        TYPE_PARSE_ERROR,
+        f"failed to parse type definition: {original or 'syntax error'}",
+        source=source[:200],
+        original_error=original,
+        hint="ensure the source is valid C-style declaration (e.g. 'typedef struct {int x;} Foo;')",
+    )
+
+
+def symbol_not_found(target: Any) -> BinjaError:
+    return BinjaError(
+        SYMBOL_NOT_FOUND,
+        f"symbol not found: {target!r}",
+        target=str(target),
+        hint="use list_symbols to enumerate available symbols",
+    )
