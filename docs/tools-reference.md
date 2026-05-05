@@ -102,6 +102,10 @@ List exported symbols (paginated). Returns `ExportedFunctionSymbol` entries.
   "offset": 0, "limit": 100, "total": N, "has_more": false
 }
 ```
+> **Heuristic note**: Real BN has no `ExportedFunctionSymbol` enum value. We
+> approximate exports as `FunctionSymbol` entries that are *not* auto-generated.
+> PE files with an explicit export table match this heuristic well; stripped ELFs
+> may produce false negatives (exported functions appear as regular symbols).
 
 ## Symbols
 

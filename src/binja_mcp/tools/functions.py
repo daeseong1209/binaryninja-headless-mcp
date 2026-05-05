@@ -40,10 +40,12 @@ def list_functions(
         total = len(funcs_list)
         funcs_seq = funcs_list
 
-    # Slice only the requested page before summarising
-    if hasattr(funcs_seq, "__getitem__"):
+    # Slice only the requested page before summarising. Real BN's FunctionList
+    # raises (TypeError or IndexError) for slice objects despite supporting
+    # int-based __getitem__, so fall back to islice on either.
+    try:
         sliced = list(funcs_seq[offset : offset + limit])
-    else:
+    except (TypeError, IndexError):
         sliced = list(itertools.islice(funcs_seq, offset, offset + limit))
 
     summaries = [function_to_summary(f) for f in sliced]

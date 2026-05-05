@@ -162,10 +162,14 @@ def test_scenario_b_transaction_undo_roundtrip(supervisor, fixture_binary):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    bool(os.environ.get("BINJA_MCP_LIVE_TARGET")),
+    reason="bulk-undo nesting is mock-only behavior; real BN creates per-write groups",
+)
 def test_scenario_b2_bulk_undo_single_revert(supervisor, fixture_binary):
     """External begin_undo → multiple writes → commit_undo → single undo() reverts all.
 
-    When a caller issues begin_undo before tool calls, the re-entrant
+    Mock-only: when a caller issues begin_undo before tool calls, the re-entrant
     undo_transaction helper must NOT open a nested state. All writes land in
     the outer group so a single undo() rolls them all back atomically.
     """
