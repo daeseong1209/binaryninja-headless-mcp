@@ -12,6 +12,7 @@ in-memory so tests are reproducible.
 from __future__ import annotations
 
 import hashlib
+import uuid
 from dataclasses import dataclass, field
 from enum import IntEnum
 from pathlib import Path
@@ -121,6 +122,11 @@ class MockBinaryView:
     segments: list[MockSegment] = field(default_factory=list)
     sections: dict[str, MockSection] = field(default_factory=dict)
     _xrefs_to: dict[int, list[MockReference]] = field(default_factory=dict)
+    _undo_stack: list[dict] = field(default_factory=list, init=False, repr=False, compare=False)
+    _redo_stack: list[dict] = field(default_factory=list, init=False, repr=False, compare=False)
+    _open_undo_states: dict[str, list] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         self.file = MockFile(self.path)
@@ -245,6 +251,46 @@ class MockBinaryView:
                 is_export=True,
             )
         )
+
+    # Undo / redo API surface --------------------------------------------------
+
+    def begin_undo_actions(self, anonymous: bool = False) -> str:  # noqa: ARG002
+        state_id = uuid.uuid4().hex
+        self._open_undo_states[state_id] = []
+        return state_id
+
+    def commit_undo_actions(self, state_id: str = "") -> None:
+        if not state_id:
+            if not self._open_undo_states:
+                return
+            state_id = next(reversed(self._open_undo_states))
+        if state_id not in self._open_undo_states:
+            raise KeyError(state_id)
+        entries = self._open_undo_states.pop(state_id)
+        if entries:
+            self._undo_stack.append({"id": state_id, "entries": entries})
+        self._redo_stack.clear()
+
+    def revert_undo_actions(self, state_id: str = "") -> None:
+        self._open_undo_states.pop(state_id, None)
+
+    def undo(self) -> None:
+        if self._undo_stack:
+            self._redo_stack.append(self._undo_stack.pop())
+
+    def redo(self) -> None:
+        if self._redo_stack:
+            self._undo_stack.append(self._redo_stack.pop())
+
+    def _record_undo(self, kind: str, **payload) -> None:
+        """Append an entry to the most recent open undo state, or to a singleton group."""
+        entry = {"kind": kind, **payload}
+        if self._open_undo_states:
+            latest = next(reversed(self._open_undo_states))
+            self._open_undo_states[latest].append(entry)
+        else:
+            self._undo_stack.append({"id": "auto", "entries": [entry]})
+            self._redo_stack.clear()
 
     # API surface used by tools ------------------------------------------------
 

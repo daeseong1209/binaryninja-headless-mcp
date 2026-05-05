@@ -97,6 +97,29 @@ List exported symbols (paginated). Returns `ExportedFunctionSymbol` entries.
 }
 ```
 
+## Undo / Redo
+
+### `begin_undo(binary_id)`
+Start a new undo group. Returns `{"state_id": "..."}`. Pass the returned
+`state_id` to `commit_undo` after performing write operations.
+
+### `commit_undo(binary_id, state_id)`
+Commit the open undo group identified by `state_id`. All write operations
+recorded since `begin_undo` are grouped into a single undoable action.
+Returns `{"committed": state_id}`.
+Empty groups (no recorded writes) are silently dropped — the undo stack is not
+modified, but `commit_undo` still returns successfully.
+
+### `undo(binary_id)`
+Roll back the most recent undo group.
+Returns `{"undone": bool, "remaining": int}`. `undone` is `False` when the
+undo stack is empty (no-op). Committing a new change after `undo` clears the
+redo stack (standard Binary Ninja behavior).
+
+### `redo(binary_id)`
+Re-apply the most recently undone group.
+Returns `{"redone": bool, "remaining": int}`.
+
 ## Strings
 
 ### `search_strings(binary_id, pattern=None, regex=False, case_sensitive=True, offset=0, limit=100)`
@@ -124,6 +147,7 @@ Search strings discovered by Binary Ninja's analysis.
 | `list_exports` | `offset` < 0 or `limit` ≤ 0 | `ValueError` |
 | `search_strings` | `pattern` exceeds 256 characters | `ValueError("pattern too long (max 256)")` |
 | `search_strings` | Regex evaluation exceeds 2 s | `TimeoutError("regex match exceeded 2.0s")` |
+| `commit_undo` | `state_id` not open or already committed | `BinjaError("unknown or already-committed undo state_id: ...")` (`.code == "UNDO_STATE_INVALID"`) |
 
 All exceptions surface to the MCP client as a tool error with the original
 message intact.

@@ -16,6 +16,7 @@ from binja_mcp.tools import info as t_info
 from binja_mcp.tools import lifecycle as t_lifecycle
 from binja_mcp.tools import sections as t_sections
 from binja_mcp.tools import strings as t_strings
+from binja_mcp.tools import undo as t_undo
 from binja_mcp.tools import xrefs as t_xrefs
 
 
@@ -441,6 +442,93 @@ class TestSections:
         assert result["items"] == []
 
 
+# --- undo / redo -------------------------------------------------------------
+
+
+class TestUndo:
+    def test_begin_undo_returns_state_id(self, ctx, open_id):
+        r = t_undo.begin_undo(open_id, ctx)
+        assert "state_id" in r
+        assert isinstance(r["state_id"], str)
+        assert len(r["state_id"]) >= 8
+
+    def test_begin_then_commit_pushes_to_undo_stack(self, ctx, open_id, supervisor):
+        bv = supervisor.get(open_id).bv
+        state = t_undo.begin_undo(open_id, ctx)["state_id"]
+        # Simulate a write operation (PR #4 territory) by calling _record_undo directly
+        bv._record_undo("rename", addr=0x401000, before="old", after="new")
+        result = t_undo.commit_undo(open_id, state, ctx)
+        assert result["committed"] == state
+        assert len(bv._undo_stack) == 1
+        assert bv._undo_stack[-1]["id"] == state
+        assert bv._undo_stack[-1]["entries"][0]["kind"] == "rename"
+
+    def test_commit_unknown_state_raises_binja_error(self, ctx, open_id):
+        from binja_mcp.errors import UNDO_STATE_INVALID, BinjaError
+        with pytest.raises(BinjaError) as exc_info:
+            t_undo.commit_undo(open_id, "no-such-state", ctx)
+        assert exc_info.value.code == UNDO_STATE_INVALID
+        assert "no-such-state" in str(exc_info.value)
+        assert exc_info.value.extra.get("state_id") == "no-such-state"
+
+    def test_commit_empty_group_is_noop(self, ctx, open_id, supervisor):
+        bv = supervisor.get(open_id).bv
+        state = t_undo.begin_undo(open_id, ctx)["state_id"]
+        # No _record_undo calls — empty group
+        t_undo.commit_undo(open_id, state, ctx)
+        assert len(bv._undo_stack) == 0  # empty group not pushed
+
+    def test_undo_pops_and_pushes_redo(self, ctx, open_id, supervisor):
+        bv = supervisor.get(open_id).bv
+        st = t_undo.begin_undo(open_id, ctx)["state_id"]
+        bv._record_undo("rename", addr=0x1000, before="a", after="b")
+        t_undo.commit_undo(open_id, st, ctx)
+        assert len(bv._undo_stack) == 1
+        r = t_undo.undo(open_id, ctx)
+        assert r["undone"] is True
+        assert r["remaining"] == 0
+        assert len(bv._redo_stack) == 1
+
+    def test_undo_empty_stack_returns_false(self, ctx, open_id):
+        r = t_undo.undo(open_id, ctx)
+        assert r["undone"] is False
+        assert r["remaining"] == 0
+
+    def test_redo_pops_and_pushes_undo(self, ctx, open_id, supervisor):
+        bv = supervisor.get(open_id).bv
+        st = t_undo.begin_undo(open_id, ctx)["state_id"]
+        bv._record_undo("rename", addr=0x1000, before="a", after="b")
+        t_undo.commit_undo(open_id, st, ctx)
+        t_undo.undo(open_id, ctx)
+        r = t_undo.redo(open_id, ctx)
+        assert r["redone"] is True
+        assert len(bv._undo_stack) == 1
+        assert len(bv._redo_stack) == 0
+
+    def test_redo_empty_stack_returns_false(self, ctx, open_id):
+        r = t_undo.redo(open_id, ctx)
+        assert r["redone"] is False
+
+    def test_commit_invalidates_redo_stack(self, ctx, open_id, supervisor):
+        """A new commit must clear the redo stack (BN standard behavior)."""
+        bv = supervisor.get(open_id).bv
+        # 1st commit + undo → redo stack has 1 entry
+        st1 = t_undo.begin_undo(open_id, ctx)["state_id"]
+        bv._record_undo("rename", addr=0x1000, before="a", after="b")
+        t_undo.commit_undo(open_id, st1, ctx)
+        t_undo.undo(open_id, ctx)
+        assert len(bv._redo_stack) == 1
+        # 2nd commit → redo stack cleared
+        st2 = t_undo.begin_undo(open_id, ctx)["state_id"]
+        bv._record_undo("comment", addr=0x2000, text="x")
+        t_undo.commit_undo(open_id, st2, ctx)
+        assert len(bv._redo_stack) == 0
+
+    def test_unknown_binary_id_raises(self, ctx):
+        with pytest.raises(ValueError, match="unknown binary_id"):
+            t_undo.undo("does-not-exist", ctx)
+
+
 # --- registry sanity --------------------------------------------------------
 
 
@@ -463,5 +551,9 @@ def test_registry_contains_all_core_tools():
         "list_sections",
         "list_imports",
         "list_exports",
+        "undo",
+        "redo",
+        "begin_undo",
+        "commit_undo",
     }
     assert expected.issubset(names), f"missing: {expected - names}"

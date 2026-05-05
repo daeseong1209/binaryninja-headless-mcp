@@ -26,6 +26,7 @@ BINARY_NOT_FOUND = "BINARY_NOT_FOUND"
 FUNCTION_NOT_FOUND = "FUNCTION_NOT_FOUND"
 INVALID_IL_LEVEL = "INVALID_IL_LEVEL"
 INVALID_ADDRESS = "INVALID_ADDRESS"
+UNDO_STATE_INVALID = "UNDO_STATE_INVALID"
 
 
 # Factory helpers (consistent hint messages)
@@ -62,4 +63,16 @@ def invalid_address(value: Any) -> BinjaError:
         f"could not interpret {value!r} as function or address",
         value=str(value),
         hint='use a hex address like "0x401000" or a known function name',
+    )
+
+
+def undo_state_invalid(state_id: str) -> BinjaError:
+    return BinjaError(
+        UNDO_STATE_INVALID,
+        f"unknown or already-committed undo state_id: {state_id}",
+        state_id=state_id,
+        hint=(
+            "call begin_undo first to obtain a valid state_id;"
+            " commit_undo can be called only once per state"
+        ),
     )
