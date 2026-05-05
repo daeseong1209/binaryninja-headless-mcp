@@ -6,7 +6,7 @@ from typing import Any
 
 from mcp.server.fastmcp import Context
 
-from ..errors import invalid_address
+from ..errors import invalid_address, invalid_il_level
 from ..registry import tool
 from ..server import get_supervisor
 from ..utils import parse_address, truncate_text
@@ -47,6 +47,8 @@ def get_il(
     Args:
         level: one of "LLIL", "MLIL", "HLIL" (case-insensitive).
     """
+    if not isinstance(level, str):
+        raise invalid_il_level(level)
     sup = get_supervisor(ctx)
     session = get_session(sup, binary_id)
     func = find_function(session.bv, addr_or_name)

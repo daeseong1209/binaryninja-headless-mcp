@@ -50,6 +50,7 @@ packages = ["src/binja_mcp"]
 testpaths = ["tests"]
 markers = [
     "live: tests that require a real Binary Ninja installation and license",
+    "perf: performance benchmarks (skip in CI by default)",
 ]
 asyncio_mode = "auto"
 

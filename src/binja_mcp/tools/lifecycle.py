@@ -8,8 +8,10 @@ from typing import Any
 
 from mcp.server.fastmcp import Context
 
+from ..errors import binary_not_found
 from ..registry import tool
 from ..server import get_supervisor
+from ..supervisor import BinaryNotFoundError
 
 _ALLOWED_ROOTS_ENV = "BINJA_MCP_ALLOWED_ROOTS"
 
@@ -74,7 +76,10 @@ def open_binary(path: str, ctx: Context, update_analysis: bool = True) -> dict[s
 def close_binary(binary_id: str, ctx: Context) -> dict[str, Any]:
     """Close an open binary session and free resources."""
     sup = get_supervisor(ctx)
-    sup.close(binary_id)
+    try:
+        sup.close(binary_id)
+    except BinaryNotFoundError:
+        raise binary_not_found(binary_id) from None
     return {"closed": binary_id}
 
 
