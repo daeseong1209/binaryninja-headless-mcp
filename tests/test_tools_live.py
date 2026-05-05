@@ -269,6 +269,27 @@ def test_list_exports_real_pe(live_session):
 
 
 @pytest.mark.live
+def test_begin_commit_undo_redo_cycle_real(live_session):
+    """begin → commit (empty) → undo (no-op) → redo (no-op) cycle on real BN."""
+    from binja_mcp.tools import undo as t_undo
+
+    sup = live_session["supervisor"]
+    binary_id = live_session["binary_id"]
+    ctx = _ctx(sup)
+
+    state = t_undo.begin_undo(binary_id, ctx)["state_id"]
+    assert isinstance(state, str)
+    t_undo.commit_undo(binary_id, state, ctx)  # empty group, no-op but must not crash
+
+    # real BN: undo with no changes is a no-op
+    r = t_undo.undo(binary_id, ctx)
+    assert "undone" in r
+
+    r2 = t_undo.redo(binary_id, ctx)
+    assert "redone" in r2
+
+
+@pytest.mark.live
 def test_close_real_binary_frees_session(live_session):
     """Closing the binary should leave zero open sessions.
 
