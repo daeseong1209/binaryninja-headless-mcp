@@ -22,8 +22,9 @@ dist/
 .vscode/
 .idea/
 
-# OMC / OpenChrome workspace state
+# OMC / OMX / OpenChrome workspace state
 .omc/
+.omx/
 .openchrome/
 
 # OS

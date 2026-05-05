@@ -1,6 +1,0 @@
-{
-  "last_turn_at": "2026-05-05T17:20:47.869Z",
-  "turn_count": 3,
-  "last_progress_at": "2026-05-05T17:20:47.869Z",
-  "last_agent_output": "[CRITICAL] `src/binja_mcp/tools/types.py:100` valid real-BN `define_type` results are rejected.\n  De"
-}
