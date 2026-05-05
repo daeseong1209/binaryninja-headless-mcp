@@ -1,8 +1,9 @@
-# Tools Reference (v0.1)
+# Tools Reference (v0.3)
 
-All tools accept a `binary_id` returned by `open_binary` (except the lifecycle
-tools themselves). Errors raise standard Python exceptions, which FastMCP
-converts into MCP `isError: true` responses with the original message.
+**23 tools** are registered across 9 modules. All tools accept a `binary_id`
+returned by `open_binary` (except the lifecycle tools themselves). Errors raise
+standard Python exceptions, which FastMCP converts into MCP `isError: true`
+responses with the original message.
 
 Address arguments accept either an integer or a string (`"0x401234"`,
 `"4198964"`).
@@ -97,6 +98,52 @@ List exported symbols (paginated). Returns `ExportedFunctionSymbol` entries.
 }
 ```
 
+## Symbols
+
+### `list_symbols(binary_id, symbol_type=None, name_or_addr=None, offset=0, limit=100)`
+List symbols in the binary (paginated).
+- **symbol_type** — optional filter: `"function"`, `"imported_function"`, `"import_address"`,
+  `"imports"`, `"data"`, `"external"`, `"library_function"`. `None` = all symbols.
+- **name_or_addr** — if provided, look up a single symbol by name or hex address; raises
+  `SYMBOL_NOT_FOUND` if absent. Ignores `symbol_type`, `offset`, and `limit`.
+- Response (`paginate()` envelope):
+```json
+{
+  "items": [{"name": "...", "full_name": "...", "address": "0x...",
+             "type": "FunctionSymbol", "auto": true, "ordinal": 0}],
+  "offset": 0, "limit": 100, "total": N, "has_more": false
+}
+```
+
+### `rename_symbol(binary_id, addr, new_name)`
+Rename a function or data symbol at the given address.
+- Function path: assigns `func.name` directly (Binary Ninja preferred path for functions).
+- Data path: calls `define_user_symbol(DataSymbol)` — creates a new symbol or renames existing.
+- Automatically wraps the write in `begin_undo` / `commit_undo` so the operation is
+  undoable with `undo()`.
+- Response: `{"kind": "function"|"data", "address": "0x...", "before": "old_name", "after": "new_name"}`
+
+## Types
+
+### `define_data_var(binary_id, addr, type_str)`
+Annotate a data variable at `addr` with the given type.
+- **type_str** — any type string accepted by Binary Ninja's `parse_type_string`:
+  `"uint64_t"`, `"char*"`, `"struct Foo*"`.
+- Automatically wrapped in an undo transaction.
+- Response: `{"address": "0x...", "type": "uint64_t"}`
+
+### `get_type(binary_id, name)`
+Retrieve a named type from the binary's type library.
+- Response: `{"name": "Foo", "definition": "typedef struct {...} Foo;"}`.
+  `definition` is `None` if the type is not defined.
+
+### `define_type(binary_id, name, source)`
+Define or replace a named type from C source.
+- **source** — C source string, e.g. `"typedef struct {int x; int y;} Point;"`.
+- Multi-type source is accepted; `name` must appear among the parsed types.
+- QualifiedName keys are auto-converted to plain strings.
+- Response: `{"name": "Point", "definition": "typedef struct {...} Point;"}`
+
 ## Undo / Redo
 
 ### `begin_undo(binary_id)`
@@ -148,6 +195,9 @@ Search strings discovered by Binary Ninja's analysis.
 | `search_strings` | `pattern` exceeds 256 characters | `ValueError("pattern too long (max 256)")` |
 | `search_strings` | Regex evaluation exceeds 2 s | `TimeoutError("regex match exceeded 2.0s")` |
 | `commit_undo` | `state_id` not open or already committed | `BinjaError("unknown or already-committed undo state_id: ...")` (`.code == "UNDO_STATE_INVALID"`) |
+| `define_data_var`, `define_type` | invalid / unparseable type | `BinjaError("failed to parse type definition: ...")` (`.code == "TYPE_PARSE_ERROR"`) |
+| `list_symbols` (with `name_or_addr`) | symbol not found | `BinjaError("symbol not found: ...")` (`.code == "SYMBOL_NOT_FOUND"`) |
+| `rename_symbol`, `define_data_var` | bad / unparseable address | `BinjaError(.code == "INVALID_ADDRESS")` |
 
 All exceptions surface to the MCP client as a tool error with the original
 message intact.

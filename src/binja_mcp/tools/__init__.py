@@ -11,6 +11,8 @@ from . import (
     lifecycle,  # noqa: F401
     sections,  # noqa: F401
     strings,  # noqa: F401
+    symbols,  # noqa: F401
+    types,  # noqa: F401
     undo,  # noqa: F401
     xrefs,  # noqa: F401
 )

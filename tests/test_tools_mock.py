@@ -16,6 +16,8 @@ from binja_mcp.tools import info as t_info
 from binja_mcp.tools import lifecycle as t_lifecycle
 from binja_mcp.tools import sections as t_sections
 from binja_mcp.tools import strings as t_strings
+from binja_mcp.tools import symbols as t_symbols
+from binja_mcp.tools import types as t_types
 from binja_mcp.tools import undo as t_undo
 from binja_mcp.tools import xrefs as t_xrefs
 
@@ -529,6 +531,276 @@ class TestUndo:
             t_undo.undo("does-not-exist", ctx)
 
 
+# --- symbols -----------------------------------------------------------------
+
+
+class TestSymbols:
+    def test_list_symbols_all(self, ctx, open_id):
+        result = t_symbols.list_symbols(open_id, ctx)
+        assert result["total"] >= 1
+        names = {it["name"] for it in result["items"]}
+        # Mock has _start, printf (ImportedFunctionSymbol), global_var (DataSymbol)
+        assert "_start" in names, f"_start not in {names}"
+        assert "printf" in names, f"printf not in {names}"
+        assert "global_var" in names, f"global_var not in {names}"
+
+    def test_list_symbols_function_filter(self, ctx, open_id):
+        result = t_symbols.list_symbols(open_id, ctx, symbol_type="function")
+        names = {it["name"] for it in result["items"]}
+        # FunctionSymbol entries from populate_default
+        assert "_start" in names, f"_start not in function symbols: {names}"
+        # imported function must not appear
+        assert "printf" not in names, f"printf (imported) leaked into function filter: {names}"
+
+    def test_list_symbols_imported_function_filter(self, ctx, open_id):
+        result = t_symbols.list_symbols(open_id, ctx, symbol_type="imported_function")
+        names = {it["name"] for it in result["items"]}
+        assert "printf" in names, f"printf not in imported_function filter: {names}"
+
+    def test_list_symbols_data_filter(self, ctx, open_id):
+        result = t_symbols.list_symbols(open_id, ctx, symbol_type="data")
+        names = {it["name"] for it in result["items"]}
+        assert "global_var" in names, f"global_var not in data filter: {names}"
+
+    def test_list_symbols_pagination_offset_past_end(self, ctx, open_id):
+        total = t_symbols.list_symbols(open_id, ctx)["total"]
+        result = t_symbols.list_symbols(open_id, ctx, offset=total)
+        assert result["items"] == []
+        assert result["has_more"] is False
+
+    def test_list_symbols_unknown_type_raises(self, ctx, open_id):
+        with pytest.raises(ValueError, match="unknown symbol_type"):
+            t_symbols.list_symbols(open_id, ctx, symbol_type="bogus_type")
+
+    def test_rename_symbol_function_path_and_undo(self, ctx, open_id, supervisor):
+        bv = supervisor.get(open_id).bv
+        # Get _start address
+        funcs = t_functions.list_functions(open_id, ctx, limit=10)
+        start_func = next(it for it in funcs["items"] if it["name"] == "_start")
+        addr = start_func["start"]
+
+        # Rename
+        result = t_symbols.rename_symbol(open_id, addr, "RENAMED_START", ctx)
+        assert result["kind"] == "function"
+        assert result["after"] == "RENAMED_START"
+        assert result["before"] == "_start"
+
+        # Verify new name appears in list_symbols
+        syms = t_symbols.list_symbols(open_id, ctx)
+        names = {it["name"] for it in syms["items"]}
+        assert "RENAMED_START" in names
+
+        # Verify undo entry recorded before calling undo
+        assert len(bv._undo_stack) >= 1
+        entry = bv._undo_stack[-1]["entries"][-1]
+        assert entry["kind"] == "rename_function"
+        assert entry["before"] == "_start"
+        assert entry["after"] == "RENAMED_START"
+
+        # Undo: entry moves from undo_stack to redo_stack
+        t_undo.undo(open_id, ctx)
+        assert len(bv._redo_stack) >= 1
+
+    def test_rename_symbol_data_path_and_undo(self, ctx, open_id, supervisor):
+        bv = supervisor.get(open_id).bv
+        # global_var is a DataSymbol; find its address
+        syms_all = t_symbols.list_symbols(open_id, ctx, symbol_type="data")
+        global_sym = next(it for it in syms_all["items"] if it["name"] == "global_var")
+        addr = global_sym["address"]
+
+        # Rename via data path (no function at that address in mock)
+        result = t_symbols.rename_symbol(open_id, addr, "RENAMED_GLOBAL", ctx)
+        assert result["kind"] == "data"
+        assert result["after"] == "RENAMED_GLOBAL"
+
+        # Verify it appears
+        syms_after = t_symbols.list_symbols(open_id, ctx, symbol_type="data")
+        names = {it["name"] for it in syms_after["items"]}
+        assert "RENAMED_GLOBAL" in names
+
+        # Undo entry recorded
+        assert len(bv._undo_stack) >= 1
+
+    def test_rename_symbol_invalid_address_raises(self, ctx, open_id):
+        from binja_mcp.errors import INVALID_ADDRESS, BinjaError
+
+        with pytest.raises(BinjaError) as exc_info:
+            t_symbols.rename_symbol(open_id, "not_an_address", "name", ctx)
+        assert exc_info.value.code == INVALID_ADDRESS
+
+    def test_rename_symbol_empty_name_raises(self, ctx, open_id):
+        with pytest.raises(ValueError):
+            t_symbols.rename_symbol(open_id, "0x1000", "", ctx)
+
+    def test_rename_symbol_unknown_binary_id(self, ctx):
+        with pytest.raises(ValueError, match="unknown binary_id"):
+            t_symbols.rename_symbol("no-such-id", "0x1000", "name", ctx)
+
+    def test_list_symbols_by_name(self, ctx, open_id):
+        """name_or_addr lookup by name returns the single matching symbol."""
+        result = t_symbols.list_symbols(open_id, ctx, name_or_addr="printf")
+        assert result["total"] == 1
+        assert result["items"][0]["name"] == "printf"
+
+    def test_list_symbols_by_addr(self, ctx, open_id):
+        """name_or_addr lookup by hex address returns the matching symbol."""
+        # pick the address of 'printf' symbol
+        syms = t_symbols.list_symbols(open_id, ctx, symbol_type="imported_function")
+        printf_sym = next(it for it in syms["items"] if it["name"] == "printf")
+        result = t_symbols.list_symbols(open_id, ctx, name_or_addr=printf_sym["address"])
+        assert result["total"] == 1
+        assert result["items"][0]["name"] == "printf"
+
+    def test_list_symbols_unknown_target_raises_symbol_not_found(self, ctx, open_id):
+        """name_or_addr with an unknown name raises BinjaError(SYMBOL_NOT_FOUND)."""
+        from binja_mcp.errors import SYMBOL_NOT_FOUND, BinjaError
+
+        with pytest.raises(BinjaError) as exc_info:
+            t_symbols.list_symbols(open_id, ctx, name_or_addr="no_such_symbol_xyz")
+        assert exc_info.value.code == SYMBOL_NOT_FOUND
+        assert exc_info.value.extra.get("target") == "no_such_symbol_xyz"
+
+    def test_rename_symbol_function_undo_actually_reverts(self, ctx, open_id):
+        """After undo, the renamed function reverts to its original name."""
+        funcs = t_functions.list_functions(open_id, ctx, limit=10)
+        start_func = next(it for it in funcs["items"] if it["name"] == "_start")
+        addr = start_func["start"]
+        original = "_start"
+
+        t_symbols.rename_symbol(open_id, addr, "UNDO_TEST_FUNC", ctx)
+        names_after = {
+            f["name"]
+            for f in t_functions.list_functions(open_id, ctx, limit=10)["items"]
+        }
+        assert "UNDO_TEST_FUNC" in names_after
+
+        t_undo.undo(open_id, ctx)
+        names_reverted = {
+            f["name"]
+            for f in t_functions.list_functions(open_id, ctx, limit=10)["items"]
+        }
+        assert "UNDO_TEST_FUNC" not in names_reverted
+        assert original in names_reverted
+
+
+# --- types -------------------------------------------------------------------
+
+
+class TestTypes:
+    def test_define_data_var_simple_type(self, ctx, open_id, supervisor):
+        bv = supervisor.get(open_id).bv
+        funcs = t_functions.list_functions(open_id, ctx, limit=1)
+        addr = funcs["items"][0]["start"]
+
+        result = t_types.define_data_var(open_id, addr, "uint64_t", ctx)
+        assert result["address"] == addr
+        assert result["type"] == "uint64_t"
+
+        # data_vars dict updated
+        int_addr = int(addr, 16)
+        assert int_addr in bv.data_vars
+        assert bv.data_vars[int_addr].type_str == "uint64_t"
+
+        # Undo entry recorded
+        assert len(bv._undo_stack) >= 1
+        assert bv._undo_stack[-1]["entries"][-1]["kind"] == "define_user_data_var"
+
+        # Undo reverts the data_var and moves entry to redo_stack
+        t_undo.undo(open_id, ctx)
+        assert len(bv._redo_stack) >= 1
+        assert int_addr not in bv.data_vars
+
+    def test_define_data_var_pointer_type(self, ctx, open_id, supervisor):
+        bv = supervisor.get(open_id).bv
+        funcs = t_functions.list_functions(open_id, ctx, limit=2)
+        addr = funcs["items"][1]["start"]
+
+        result = t_types.define_data_var(open_id, addr, "char*", ctx)
+        assert result["type"] == "char*"
+        int_addr = int(addr, 16)
+        assert bv.data_vars[int_addr].type_str == "char*"
+
+    def test_define_data_var_bad_type_raises(self, ctx, open_id):
+        from binja_mcp.errors import TYPE_PARSE_ERROR, BinjaError
+
+        with pytest.raises(BinjaError) as exc_info:
+            # Unclosed brace — mock parse_type_string raises ValueError
+            t_types.define_data_var(open_id, "0x1000", "struct {int x;", ctx)
+        assert exc_info.value.code == TYPE_PARSE_ERROR
+        assert "source" in exc_info.value.extra
+        assert "hint" in exc_info.value.extra
+
+    def test_get_type_not_found_returns_none(self, ctx, open_id):
+        result = t_types.get_type(open_id, "NonExistentType", ctx)
+        assert result["name"] == "NonExistentType"
+        assert result["definition"] is None
+
+    def test_define_type_single_struct_roundtrip(self, ctx, open_id, supervisor):
+        bv = supervisor.get(open_id).bv
+        source = "typedef struct {int x; int y;} Point;"
+        result = t_types.define_type(open_id, "Point", source, ctx)
+        assert result["name"] == "Point"
+        assert result["definition"]
+
+        # get_type retrieves it
+        got = t_types.get_type(open_id, "Point", ctx)
+        assert got["definition"] is not None
+        assert "Point" in got["definition"] or "struct" in got["definition"]
+
+        # Undo entry recorded
+        assert len(bv._undo_stack) >= 1
+        entry = bv._undo_stack[-1]["entries"][-1]
+        assert entry["kind"] == "define_user_type"
+        assert entry["type_name"] == "Point"
+
+        # Undo reverts the type definition — get_type should return None after
+        t_undo.undo(open_id, ctx)
+        assert len(bv._redo_stack) >= 1
+        reverted = t_types.get_type(open_id, "Point", ctx)
+        assert reverted["definition"] is None
+
+    def test_define_type_multi_source_name_present(self, ctx, open_id):
+        source = "typedef struct {int a;} Alpha; typedef struct {int b;} Beta;"
+        result = t_types.define_type(open_id, "Alpha", source, ctx)
+        assert result["name"] == "Alpha"
+
+    def test_define_type_multi_source_name_absent_raises(self, ctx, open_id):
+        from binja_mcp.errors import TYPE_PARSE_ERROR, BinjaError
+
+        source = "typedef struct {int a;} Alpha; typedef struct {int b;} Beta;"
+        with pytest.raises(BinjaError) as exc_info:
+            t_types.define_type(open_id, "Gamma", source, ctx)
+        assert exc_info.value.code == TYPE_PARSE_ERROR
+
+    def test_define_type_bad_source_raises(self, ctx, open_id):
+        from binja_mcp.errors import TYPE_PARSE_ERROR, BinjaError
+
+        with pytest.raises(BinjaError) as exc_info:
+            t_types.define_type(open_id, "Foo", "this is not c code", ctx)
+        assert exc_info.value.code == TYPE_PARSE_ERROR
+
+    def test_define_type_empty_name_raises(self, ctx, open_id):
+        with pytest.raises(ValueError, match="name must be non-empty"):
+            t_types.define_type(open_id, "", "typedef int X;", ctx)
+
+    def test_define_type_empty_source_raises(self, ctx, open_id):
+        with pytest.raises(ValueError, match="source must be non-empty"):
+            t_types.define_type(open_id, "X", "", ctx)
+
+    def test_type_parse_error_extra_fields(self, ctx, open_id):
+        """TYPE_PARSE_ERROR must expose .extra['source'] and a hint."""
+        from binja_mcp.errors import TYPE_PARSE_ERROR, BinjaError
+
+        with pytest.raises(BinjaError) as exc_info:
+            t_types.define_data_var(open_id, "0x1000", "struct {int x;", ctx)
+        err = exc_info.value
+        assert err.code == TYPE_PARSE_ERROR
+        assert "source" in err.extra
+        assert err.extra["source"]  # non-empty
+        assert "hint" in err.extra
+        assert "C-style" in err.extra["hint"] or "declaration" in err.extra["hint"]
+
+
 # --- registry sanity --------------------------------------------------------
 
 
@@ -555,5 +827,11 @@ def test_registry_contains_all_core_tools():
         "redo",
         "begin_undo",
         "commit_undo",
+        "list_symbols",
+        "rename_symbol",
+        "define_data_var",
+        "get_type",
+        "define_type",
     }
     assert expected.issubset(names), f"missing: {expected - names}"
+    assert len(names) == 23, f"expected 23 tools, got {len(names)}: {sorted(names)}"
