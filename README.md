@@ -116,6 +116,28 @@ BINJA_MCP_LIVE_TARGET=/path/to/real/binary pytest -m live
 
 Requires `binaryninja` importable and a valid Commercial/Ultimate license.
 
+### Live test tiers
+
+binja-mcp ships two live test markers:
+
+- `live_quick` (~33 cases, ~1-2 min total) — uses tiny system PE fixtures
+  (defaults: `C:\Windows\System32\hostname.exe` for x64, `C:\Windows\SysWOW64\where.exe` for x86).
+  Override via `BINJA_MCP_LIVE_TARGET_TINY_X64` / `BINJA_MCP_LIVE_TARGET_TINY_X86`.
+- `live_full` / `live` (~18 cases, ~5 min) — uses a real-world target via
+  `BINJA_MCP_LIVE_TARGET` (e.g. `C:\Program Files\Vector35\BinaryNinja\update.exe`).
+
+Run quick tier (per-PR sanity):
+
+```bash
+pytest -m live_quick
+```
+
+Run full tier (release sign-off):
+
+```bash
+BINJA_MCP_LIVE_TARGET=path/to/large.exe pytest -m "live or live_full"
+```
+
 ## Test
 
 ```bash

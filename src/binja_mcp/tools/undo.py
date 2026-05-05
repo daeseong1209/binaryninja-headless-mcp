@@ -27,8 +27,12 @@ def undo(binary_id: str, ctx: Context) -> dict[str, Any]:
     bv.undo()
     after = _stack_depth(bv, "_undo_stack")
     if before is None or after is None:
-        # Real BN: undo stack not exposed; report best-effort
-        return {"undone": True, "remaining": None}
+        # Real BN: stack not exposed; we cannot tell if anything actually changed
+        return {
+            "undone": None,
+            "remaining": None,
+            "note": "real BN does not expose undo stack depth",
+        }
     return {"undone": after < before, "remaining": after}
 
 
@@ -45,7 +49,12 @@ def redo(binary_id: str, ctx: Context) -> dict[str, Any]:
     bv.redo()
     after = _stack_depth(bv, "_redo_stack")
     if before is None or after is None:
-        return {"redone": True, "remaining": None}
+        # Real BN: stack not exposed; we cannot tell if anything actually changed
+        return {
+            "redone": None,
+            "remaining": None,
+            "note": "real BN does not expose redo stack depth",
+        }
     return {"redone": after < before, "remaining": after}
 
 
