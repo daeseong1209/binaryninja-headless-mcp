@@ -223,6 +223,20 @@ Search strings discovered by Binary Ninja's analysis.
 All exceptions surface to the MCP client as a tool error with the original
 message intact.
 
+## v0.4 — Comments
+
+### `set_comment(binary_id, addr, text, scope="global", function=None)`
+Set a comment at `addr`. `scope="function"` requires a `function` (name or address); empty `text` clears.
+
+### `get_comment(binary_id, addr, scope="global", function=None)`
+Read the comment at `addr`. Returns `{"address", "text": str|None, "scope"}`; `text` is `None` if absent.
+
+### `list_comments(binary_id, scope="all", function=None, offset=0, limit=100)`
+List comments (paginated). `scope="all"` returns global + every function's comments, each item tagged with its scope.
+
+### `remove_comment(binary_id, addr, scope="global", function=None)`
+Remove the comment at `addr`. Returns `{"address", "removed": bool, "scope"}`.
+
 ## Adding a tool
 
 1. Drop a new file in `src/binja_mcp/tools/`.

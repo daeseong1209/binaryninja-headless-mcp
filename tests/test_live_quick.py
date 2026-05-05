@@ -686,3 +686,103 @@ def test_C35_x86_decompile_entry_not_repr(tiny_x86_session):
     text = result["text"]
     assert "<HighLevelILFunction" not in text
     assert "ILFunction" not in text
+
+
+# ===========================================================================
+# Group D: v0.4 comments (3 cases on tiny_x64_session)
+# ===========================================================================
+
+
+def _find_wmain_or_first(t_functions, t_info, binary_id, ctx) -> dict[str, Any]:
+    """Return _wmain summary if present, else the entry function."""
+    page = t_functions.list_functions(binary_id, ctx, limit=200)
+    for it in page["items"]:
+        if it["name"] == "_wmain":
+            return it
+    entry = t_info.binary_info(binary_id, ctx)["entry_point"]
+    for it in page["items"]:
+        if it["start"] == entry:
+            return it
+    return page["items"][0]
+
+
+class TestCommentsLive:
+    @pytest.mark.live_quick
+    def test_D1_set_get_remove_global(self, tiny_x64_session):
+        from binja_mcp.tools import comments as t_comments  # noqa: PLC0415
+        from binja_mcp.tools import functions as t_functions  # noqa: PLC0415
+        from binja_mcp.tools import info as t_info  # noqa: PLC0415
+
+        sup = tiny_x64_session["supervisor"]
+        binary_id = tiny_x64_session["binary_id"]
+        ctx = _ctx(sup)
+
+        target = _find_wmain_or_first(t_functions, t_info, binary_id, ctx)
+        addr = target["start"]
+
+        t_comments.set_comment(binary_id, addr, "live-quick global", ctx)
+        got = t_comments.get_comment(binary_id, addr, ctx)
+        assert got["text"] == "live-quick global"
+
+        rm = t_comments.remove_comment(binary_id, addr, ctx)
+        assert rm["removed"] is True
+        assert t_comments.get_comment(binary_id, addr, ctx)["text"] is None
+
+    @pytest.mark.live_quick
+    def test_D2_function_scoped_set_then_list(self, tiny_x64_session):
+        from binja_mcp.tools import comments as t_comments  # noqa: PLC0415
+        from binja_mcp.tools import functions as t_functions  # noqa: PLC0415
+        from binja_mcp.tools import info as t_info  # noqa: PLC0415
+
+        sup = tiny_x64_session["supervisor"]
+        binary_id = tiny_x64_session["binary_id"]
+        ctx = _ctx(sup)
+
+        target = _find_wmain_or_first(t_functions, t_info, binary_id, ctx)
+        fname = target["name"]
+        # Comment at function start — guaranteed to be inside the function.
+        addr = target["start"]
+        marker = "live-quick fn-scope"
+
+        t_comments.set_comment(
+            binary_id, addr, marker, ctx, scope="function", function=fname
+        )
+        listing = t_comments.list_comments(
+            binary_id, ctx, scope="function", function=fname, limit=200
+        )
+        assert any(it["text"] == marker for it in listing["items"])
+
+        # Cleanup
+        t_comments.remove_comment(
+            binary_id, addr, ctx, scope="function", function=fname
+        )
+
+    @pytest.mark.live_quick
+    def test_D3_bulk_undo_clears_all(self, tiny_x64_session):
+        from binja_mcp.tools import comments as t_comments  # noqa: PLC0415
+        from binja_mcp.tools import functions as t_functions  # noqa: PLC0415
+        from binja_mcp.tools import info as t_info  # noqa: PLC0415
+        from binja_mcp.tools import undo as t_undo  # noqa: PLC0415
+
+        sup = tiny_x64_session["supervisor"]
+        binary_id = tiny_x64_session["binary_id"]
+        ctx = _ctx(sup)
+
+        target = _find_wmain_or_first(t_functions, t_info, binary_id, ctx)
+        base = int(target["start"], 16)
+        addrs = [f"0x{base + i * 4:x}" for i in range(3)]
+
+        before = t_comments.list_comments(binary_id, ctx, scope="global", limit=500)
+        before_count = before["total"]
+
+        state_id = t_undo.begin_undo(binary_id, ctx)["state_id"]
+        for i, a in enumerate(addrs):
+            t_comments.set_comment(binary_id, a, f"bulk-{i}", ctx)
+        t_undo.commit_undo(binary_id, state_id, ctx)
+        t_undo.undo(binary_id, ctx)
+
+        after = t_comments.list_comments(binary_id, ctx, scope="global", limit=500)
+        added = {it["text"] for it in after["items"]} & {f"bulk-{i}" for i in range(3)}
+        assert not added, f"expected bulk comments to be reverted; still present: {added}"
+        # Defensive: total count should not have grown
+        assert after["total"] <= before_count + 0

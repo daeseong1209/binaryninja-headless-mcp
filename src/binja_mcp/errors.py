@@ -86,6 +86,7 @@ def undo_state_invalid(state_id: str) -> BinjaError:
 
 TYPE_PARSE_ERROR = "TYPE_PARSE_ERROR"
 SYMBOL_NOT_FOUND = "SYMBOL_NOT_FOUND"
+COMMENT_INVALID_SCOPE = "COMMENT_INVALID_SCOPE"
 
 
 def type_parse_error(source: str, original: str = "") -> BinjaError:
@@ -104,4 +105,13 @@ def symbol_not_found(target: Any) -> BinjaError:
         f"symbol not found: {target!r}",
         target=str(target),
         hint="use list_symbols to enumerate available symbols",
+    )
+
+
+def comment_invalid_scope(scope: Any) -> BinjaError:
+    return BinjaError(
+        COMMENT_INVALID_SCOPE,
+        f"invalid comment scope: {scope!r}",
+        scope=str(scope),
+        hint='scope must be "global" or "function" (or "all" for list_comments)',
     )
