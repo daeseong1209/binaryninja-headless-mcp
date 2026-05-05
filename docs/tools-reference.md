@@ -1,4 +1,4 @@
-# Tools Reference (v0.3)
+# Tools Reference (v0.3.1)
 
 **23 tools** are registered across 9 modules. All tools accept a `binary_id`
 returned by `open_binary` (except the lifecycle tools themselves). Errors raise
@@ -18,6 +18,7 @@ Load a binary file.
 
 ### `close_binary(binary_id)`
 Close a session and free its resources. Returns `{"closed": binary_id}`.
+Raises `BinjaError(BINARY_NOT_FOUND)` for an unknown `binary_id`.
 
 ### `list_binaries()`
 Returns `{"items": [{...}], "total": N}` describing every open session.
@@ -46,7 +47,8 @@ HLIL decompilation as text. Convenience wrapper around `get_il(level="HLIL")`.
 ### `get_il(binary_id, addr_or_name, level="HLIL")`
 Returns IL text for the function. `level` is `LLIL`, `MLIL`, or `HLIL`
 (case-insensitive). The response includes a `truncated` flag when the IL
-exceeds 50 000 characters.
+exceeds 50 000 characters. Passing a non-string `level` (e.g. `None`) raises
+`BinjaError(INVALID_IL_LEVEL)` rather than an `AttributeError`.
 
 ### `get_disasm(binary_id, addr_or_name, length=64)`
 Disassembly text. If `addr_or_name` resolves to a function, the entire
@@ -79,6 +81,9 @@ List all named sections (e.g. `.text`, `.data`, `.rodata`).
   "total": N
 }
 ```
+The `semantics` field is the BN enum's `.name` attribute (e.g. `"CodeSectionSemantics"`,
+`"ReadWriteDataSectionSemantics"`) on both real BN and the mock backend. On
+real BN, this avoids the bare integer representation that `str(SectionSemantics.X)` would produce.
 
 ### `list_imports(binary_id, offset=0, limit=100)`
 List imported symbols (paginated). Returns `ImportedFunctionSymbol` and `ImportAddressSymbol` entries.
@@ -121,7 +126,8 @@ Rename a function or data symbol at the given address.
 - Data path: calls `define_user_symbol(DataSymbol)` — creates a new symbol or renames existing.
 - Automatically wraps the write in `begin_undo` / `commit_undo` so the operation is
   undoable with `undo()`.
-- Response: `{"kind": "function"|"data", "address": "0x...", "before": "old_name", "after": "new_name"}`
+- Response: `{"kind": "function"|"data", "address": "0x...", "before": "old_name"|null, "after": "new_name"}`
+  `before` is `null` only when there was no pre-existing symbol at that address (data path, new definition).
 
 ## Types
 
@@ -157,15 +163,25 @@ Returns `{"committed": state_id}`.
 Empty groups (no recorded writes) are silently dropped — the undo stack is not
 modified, but `commit_undo` still returns successfully.
 
+**Bulk-undo pattern**: when an explicit `begin_undo`/`commit_undo` pair wraps
+multiple tool calls (e.g. `rename_symbol` + `define_type`), all writes are
+recorded in the outer group. A single subsequent `undo()` reverts all of them
+atomically. This works because the internal `undo_transaction` helper detects
+the open outer state and skips creating a nested group (mock backend only;
+real BN always creates its own group per write).
+
 ### `undo(binary_id)`
 Roll back the most recent undo group.
-Returns `{"undone": bool, "remaining": int}`. `undone` is `False` when the
-undo stack is empty (no-op). Committing a new change after `undo` clears the
-redo stack (standard Binary Ninja behavior).
+Returns `{"undone": bool, "remaining": int|null}`. `undone` is `False` when
+the undo stack is empty (no-op). On real Binary Ninja the undo stack depth is
+not exposed by the API; in that case `remaining` is `null` and `undone` is
+`true` (best-effort — the `undo()` call was made without error). Committing a
+new change after `undo` clears the redo stack (standard Binary Ninja behavior).
 
 ### `redo(binary_id)`
 Re-apply the most recently undone group.
-Returns `{"redone": bool, "remaining": int}`.
+Returns `{"redone": bool, "remaining": int|null}`. `remaining` is `null` on
+real BN (redo stack not exposed).
 
 ## Strings
 
@@ -181,7 +197,8 @@ Search strings discovered by Binary Ninja's analysis.
 
 | Tool | Condition | Exception |
 |------|-----------|-----------|
-| any | Unknown `binary_id` | `ValueError("unknown binary_id: ...")` |
+| any | Unknown `binary_id` | `BinjaError(BINARY_NOT_FOUND, "unknown binary_id: ...")` |
+| `close_binary` | Unknown `binary_id` | `BinjaError(BINARY_NOT_FOUND)` |
 | `open_binary` | File missing | `FileNotFoundError` |
 | `open_binary` | Path is a symlink | `PermissionError("symlinks not allowed")` |
 | `open_binary` | Path outside `BINJA_MCP_ALLOWED_ROOTS` | `PermissionError("path ... is outside allowed roots: ...")` |
