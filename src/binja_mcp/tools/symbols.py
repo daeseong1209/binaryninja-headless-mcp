@@ -98,7 +98,14 @@ def rename_symbol(binary_id: str, addr: str, new_name: str, ctx: Context) -> dic
                 "after": new_name,
             }
 
-        # Data symbol path
+        # Data symbol path — capture existing name before overwriting
+        existing = None
+        syms = list(bv.get_symbols()) if hasattr(bv, "get_symbols") else []
+        for s in syms:
+            if getattr(s, "address", None) == address:
+                existing = getattr(s, "name", None)
+                break
+
         try:
             from binaryninja import Symbol, SymbolType  # type: ignore[import]
             sym_obj = Symbol(SymbolType.DataSymbol, address, new_name)
@@ -108,7 +115,7 @@ def rename_symbol(binary_id: str, addr: str, new_name: str, ctx: Context) -> dic
         return {
             "kind": "data",
             "address": hex_or_none(address),
-            "before": None,
+            "before": existing,
             "after": new_name,
         }
 

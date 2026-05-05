@@ -71,15 +71,24 @@ def symbol_to_dict(s: Any) -> dict[str, Any]:
 def undo_transaction(bv: Any):
     """Wrap a write block in a Binary Ninja undo group.
 
-    On entry, calls ``bv.begin_undo_actions()`` and yields the resulting
-    state_id (or None if the backend does not expose the API). On exit,
-    best-effort calls ``bv.commit_undo_actions(state_id)`` so any exception
-    raised inside the block is preserved.
+    If the mock backend already has an open undo state (e.g. the caller
+    invoked ``begin_undo`` explicitly), this nests cleanly: writes are appended
+    to that outer state and we do NOT begin/commit our own group. The outer
+    caller is responsible for commit.
+
+    On real BN, ``_open_undo_states`` is absent so ``has_outer`` is always
+    False and we always begin+commit our own group (existing behaviour).
     """
-    state_id = bv.begin_undo_actions() if hasattr(bv, "begin_undo_actions") else None
+    open_states = getattr(bv, "_open_undo_states", None)
+    has_outer = bool(open_states)  # truthy only on mock with an outer state open
+
+    state_id = None
+    if not has_outer and hasattr(bv, "begin_undo_actions"):
+        state_id = bv.begin_undo_actions()
     try:
         yield state_id
     finally:
+        # Only commit if WE opened the state (not an outer caller's group)
         if state_id is not None and hasattr(bv, "commit_undo_actions"):
             try:
                 bv.commit_undo_actions(state_id)
