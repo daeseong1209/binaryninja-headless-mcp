@@ -693,48 +693,66 @@ def test_C35_x86_decompile_entry_not_repr(tiny_x86_session):
 # ===========================================================================
 
 
+def _resolve_wmain(binary_id, ctx, t_functions):
+    """Locate the wmain entry function across BN naming variants (_wmain / wmain)."""
+    page = t_functions.list_functions(binary_id, ctx, limit=2000)
+    candidates = {it["name"] for it in page["items"]}
+    for cand in ("_wmain", "wmain"):
+        if cand in candidates:
+            return cand
+    return None
+
+
 class TestCallgraphLive:
     """Live-quick coverage for the v0.4 callgraph tools on hostname.exe."""
 
     @pytest.mark.live_quick
     def test_D36_callers_of_NlsFPutStringW_includes_wmain(self, tiny_x64_session):
-        """get_callers of _NlsFPutStringW@8 should report >=1 caller (typically _wmain)."""
+        """get_callers of NlsFPutStringW should report >=1 caller (typically wmain)."""
         from binja_mcp.tools import callgraph as t_callgraph  # noqa: PLC0415
+        from binja_mcp.tools import functions as t_functions  # noqa: PLC0415
 
         sup = tiny_x64_session["supervisor"]
         binary_id = tiny_x64_session["binary_id"]
         ctx = _ctx(sup)
-        try:
-            result = t_callgraph.get_callers(binary_id, "_NlsFPutStringW@8", ctx)
-        except ValueError:
-            pytest.skip("target function not present in this hostname.exe build")
+        # Try both x86 and x64 decoration variants
+        page = t_functions.list_functions(binary_id, ctx, limit=2000)
+        names = {it["name"] for it in page["items"]}
+        target_name = next(
+            (n for n in ("_NlsFPutStringW@8", "NlsFPutStringW") if n in names), None
+        )
+        if target_name is None:
+            pytest.skip("NlsFPutStringW not present in this hostname.exe build")
+        result = t_callgraph.get_callers(binary_id, target_name, ctx)
         assert result["total"] >= 1
-        names = {it["function"]["name"] for it in result["items"] if it.get("function")}
-        # _wmain or other expected callers should appear; we accept any non-empty set
-        assert names, f"no caller names extracted; raw items: {result['items'][:3]}"
+        caller_names = {
+            it["function"]["name"] for it in result["items"] if it.get("function")
+        }
+        assert caller_names, f"no caller names extracted; raw items: {result['items'][:3]}"
 
     @pytest.mark.live_quick
     def test_D37_callees_of_wmain_include_known_imports(self, tiny_x64_session):
-        """get_callees of _wmain should include at least one well-known import."""
+        """get_callees of wmain should include at least one well-known import."""
         from binja_mcp.tools import callgraph as t_callgraph  # noqa: PLC0415
+        from binja_mcp.tools import functions as t_functions  # noqa: PLC0415
 
         sup = tiny_x64_session["supervisor"]
         binary_id = tiny_x64_session["binary_id"]
         ctx = _ctx(sup)
-        try:
-            result = t_callgraph.get_callees(binary_id, "_wmain", ctx, limit=500)
-        except ValueError:
-            pytest.skip("_wmain not present")
+        wmain = _resolve_wmain(binary_id, ctx, t_functions)
+        if wmain is None:
+            pytest.skip("wmain not present")
+        result = t_callgraph.get_callees(binary_id, wmain, ctx, limit=500)
         target_names = {
             it["target"]["name"] for it in result["items"] if it.get("target")
         }
-        # hostname.exe _wmain calls Heap*, GetHostName*, NlsFPutStringW, etc.
         expected_any = {
             "_GetHostNameW@8",
             "_HeapSetInformation@16",
             "_NlsFPutStringW@8",
             "GetHostNameW",
             "HeapSetInformation",
+            "NlsFPutStringW",
         }
         assert target_names & expected_any, (
             f"none of {expected_any} found in callees: {sorted(target_names)[:10]}"
@@ -742,28 +760,27 @@ class TestCallgraphLive:
 
     @pytest.mark.live_quick
     def test_D38_call_sites_of_wmain_within_function_bounds(self, tiny_x64_session):
-        """get_call_sites of _wmain returns >=1 entry; every site lies within _wmain."""
+        """get_call_sites of wmain returns >=1 entry; every site lies within wmain."""
         from binja_mcp.tools import callgraph as t_callgraph  # noqa: PLC0415
         from binja_mcp.tools import functions as t_functions  # noqa: PLC0415
 
         sup = tiny_x64_session["supervisor"]
         binary_id = tiny_x64_session["binary_id"]
         ctx = _ctx(sup)
-        try:
-            sites = t_callgraph.get_call_sites(binary_id, "_wmain", ctx, limit=500)
-        except ValueError:
-            pytest.skip("_wmain not present")
+        wmain_name = _resolve_wmain(binary_id, ctx, t_functions)
+        if wmain_name is None:
+            pytest.skip("wmain not present")
+        sites = t_callgraph.get_call_sites(binary_id, wmain_name, ctx, limit=500)
         assert sites["total"] >= 1
 
-        # Locate _wmain's bounds via list_functions (avoid scanning every page)
-        page = t_functions.list_functions(binary_id, ctx, limit=500)
-        wmain = next((f for f in page["items"] if f["name"] == "_wmain"), None)
+        page = t_functions.list_functions(binary_id, ctx, limit=2000)
+        wmain = next((f for f in page["items"] if f["name"] == wmain_name), None)
         if wmain is None or wmain.get("end") is None:
-            pytest.skip("_wmain bounds not exposed in this build")
+            pytest.skip("wmain bounds not exposed in this build")
         start = int(wmain["start"], 16)
         end = int(wmain["end"], 16)
         for it in sites["items"]:
             addr = int(it["address"], 16)
             assert start <= addr < end, (
-                f"call site 0x{addr:x} outside _wmain [0x{start:x}, 0x{end:x})"
+                f"call site 0x{addr:x} outside wmain [0x{start:x}, 0x{end:x})"
             )

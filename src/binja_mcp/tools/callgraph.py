@@ -34,8 +34,15 @@ def get_callers(
     target = find_function(bv, addr_or_name)
     target_addr = getattr(target, "start", None)
 
+    # Prefer call-only sources: target.caller_sites (real BN) gives caller
+    # ReferenceSource for actual call edges. Falling back to bv.get_code_refs
+    # would include non-call data refs as callers, which is wrong.
+    sites = getattr(target, "caller_sites", None)
+    if sites is None:
+        sites = bv.get_code_refs(target_addr) if hasattr(bv, "get_code_refs") else []
+
     items: list[dict[str, Any]] = []
-    for ref in bv.get_code_refs(target_addr) or []:
+    for ref in sites or []:
         caller = getattr(ref, "function", None)
         items.append(
             {
@@ -72,23 +79,43 @@ def get_callees(
     source = find_function(bv, addr_or_name)
     source_addr = getattr(source, "start", None)
 
+    source_arch = getattr(source, "arch", None)
     items: list[dict[str, Any]] = []
     for site in getattr(source, "call_sites", None) or []:
         site_addr = getattr(site, "address", None)
         if site_addr is None:
             continue
-        callee_addrs = list(bv.get_callees(site_addr) or [])
+        # Pass func+arch when available so overlapping/multi-arch views resolve
+        # the correct callee set; bv.get_callees(addr) alone considers every
+        # function containing the address.
+        if source_arch is not None:
+            try:
+                callee_addrs = list(bv.get_callees(site_addr, source, source_arch) or [])
+            except TypeError:
+                callee_addrs = list(bv.get_callees(site_addr) or [])
+        else:
+            callee_addrs = list(bv.get_callees(site_addr) or [])
         if not callee_addrs:
             items.append({"address": hex_or_none(site_addr), "target": None})
             continue
         for ca in callee_addrs:
             callee_func = bv.get_function_at(ca)
-            items.append(
-                {
-                    "address": hex_or_none(site_addr),
-                    "target": function_to_summary(callee_func) if callee_func is not None else None,
+            if callee_func is not None:
+                target_payload: Any = function_to_summary(callee_func)
+            else:
+                # Resolved address but no Function at that address (typically a
+                # thunk/import). Surface address + symbol if present so the
+                # callee is identifiable; only fully-unresolved indirect calls
+                # produce target=None.
+                sym = bv.get_symbol_at(ca) if hasattr(bv, "get_symbol_at") else None
+                target_payload = {
+                    "name": getattr(sym, "name", None) if sym is not None else None,
+                    "start": hex_or_none(ca),
+                    "end": None,
+                    "basic_block_count": 0,
+                    "parameter_count": 0,
                 }
-            )
+            items.append({"address": hex_or_none(site_addr), "target": target_payload})
     return {
         "source": getattr(source, "name", None) or hex_or_none(source_addr),
         "source_address": hex_or_none(source_addr),

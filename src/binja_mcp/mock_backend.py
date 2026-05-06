@@ -16,6 +16,7 @@ import uuid
 from dataclasses import dataclass, field
 from enum import IntEnum
 from pathlib import Path
+from typing import Any
 
 
 class MockSymbolType(IntEnum):
@@ -95,6 +96,8 @@ class MockFunction:
     _llil: str = "// mock LLIL\n"
     _disasm: str = "nop\n"
     call_sites: list[MockCallSite] = field(default_factory=list)
+    caller_sites: list[MockReference] = field(default_factory=list)
+    arch: Any | None = None
 
     @property
     def hlil(self) -> str:
@@ -310,6 +313,22 @@ class MockBinaryView:
             self._callees_map[site_main_to_decode] = [decode_f.start]
             self._callees_map[site_helper_to_encrypt] = [encrypt_f.start]
             self._callees_map[site_decode_indirect] = []  # indirect
+
+            # caller_sites mirrors call edges into each target — used by
+            # get_callers to filter call-only edges from generic xrefs.
+            helper_f.caller_sites.append(
+                MockReference(address=site_main_to_helper, function_name="main", function=main_f)
+            )
+            decode_f.caller_sites.append(
+                MockReference(address=site_main_to_decode, function_name="main", function=main_f)
+            )
+            encrypt_f.caller_sites.append(
+                MockReference(
+                    address=site_helper_to_encrypt,
+                    function_name="helper_func",
+                    function=helper_f,
+                )
+            )
 
             self._xrefs_to.setdefault(helper_f.start, []).append(
                 MockReference(
@@ -583,9 +602,20 @@ class MockBinaryView:
     def get_code_refs(self, addr: int) -> list[MockReference]:
         return list(self._xrefs_to.get(addr, []))
 
-    def get_callees(self, call_site_addr: int) -> list[int]:
-        """Return resolved callee start addresses for a call site (empty == indirect)."""
+    def get_callees(self, call_site_addr: int, func: Any = None, arch: Any = None) -> list[int]:
+        """Return resolved callee start addresses for a call site (empty == indirect).
+
+        Real BN signature is ``get_callees(addr, func=None, arch=None)``; func+arch
+        narrow the lookup to one function on overlapping/multi-arch views.
+        """
+        del func, arch  # Mock has no overlapping functions, so the args don't matter.
         return list(self._callees_map.get(call_site_addr, []))
+
+    def get_symbol_at(self, addr: int) -> MockSymbol | None:
+        for s in self.symbols:
+            if s.address == addr:
+                return s
+        return None
 
     def get_strings(self) -> list[MockString]:
         return list(self.strings)

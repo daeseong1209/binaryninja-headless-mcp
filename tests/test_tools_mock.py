@@ -264,10 +264,10 @@ class TestCallgraph:
 
     def test_callers_function_with_no_refs(self, ctx, open_id, supervisor):
         bv = supervisor.get(open_id).bv
-        encrypt = bv.get_function_by_name("encrypt")
-        # Clear all xrefs to encrypt to simulate "no callers"
-        bv._xrefs_to[encrypt.start] = []
-        result = t_callgraph.get_callers(open_id, "encrypt", ctx)
+        compute = bv.get_function_by_name("compute")
+        # compute is a leaf: no caller_sites seeded, so it has 0 callers
+        compute.caller_sites = []
+        result = t_callgraph.get_callers(open_id, "compute", ctx)
         assert result["items"] == []
         assert result["total"] == 0
 
@@ -284,8 +284,8 @@ class TestCallgraph:
 
         helper = bv.get_function_by_name("helper_func")
         main_f = bv.get_function_by_name("main")
-        # Push enough refs to test offset/limit
-        bv._xrefs_to[helper.start] = [
+        # Populate caller_sites (call edges) for pagination check
+        helper.caller_sites = [
             MockReference(address=main_f.start + 0x20 + i, function_name="main", function=main_f)
             for i in range(5)
         ]
