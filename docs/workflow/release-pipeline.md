@@ -78,6 +78,18 @@ OMC ULTRAQA만으론 누락 있음 — OMX(Codex) 독립 리뷰에서 14건 추�
 
 긴 리뷰 프롬프트는 `[Pasted Content N chars]` 표시 후 별도 Enter가 필요 (paste 자동 submit 안 됨).
 
+### ⚠️ YOLO 모드 보안 제약 (반드시 준수)
+
+`--dangerously-bypass-approvals-and-sandbox`는 **모든 승인/샌드박스 우회**:
+- 파일 읽기/쓰기, 임의 셸 명령, 네트워크 호출 모두 허용됨
+- 따라서 다음 환경에서만 사용:
+  - **격리된 신뢰 워크스페이스** (전용 repo, 별도 user account/container)
+  - 시크릿/자격증명/사내 키 **부재** (env, ~/.aws, ~/.ssh 등 마스킹 필수)
+  - 신뢰할 수 있는 diff만 입력 (외부 PR 리뷰는 절대 yolo로 돌리지 말 것)
+  - 세션 종료 후 `pty_kill cleanup=true`로 즉시 정리
+- **금지**: production 환경, 공유 머신, 사용자 홈 디렉토리에서 실행
+- 외부 입력 신뢰 모델: 리뷰 대상 코드는 prompt-injection 시도를 포함할 수 있음 → 별도 머신/VM 권장
+
 ### OMX가 잘 잡는 각도
 - 직접 BN API 문서 조회 (Platform vs BinaryView 차이 등)
 - 적대적 정규식 패턴 사고 (ReDoS 누락 케이스)

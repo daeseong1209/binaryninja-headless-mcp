@@ -174,6 +174,14 @@ v0.3.2 시점에 `/codex:review`로 시도했으나 권한/실행 흐름 이슈�
 - 두 모델의 발견을 모두 수용 후 release
 - 자동화 시 yolo 플래그 + paste→Enter 패턴 필수
 
+### ⚠️ YOLO 사용 제약 (반드시 준수)
+`--dangerously-bypass-approvals-and-sandbox`는 모든 승인/샌드박스를 우회하므로 다음 조건에서만 사용:
+- 격리된 신뢰 워크스페이스 (전용 repo, 시크릿 부재, 신뢰할 수 있는 diff만 입력)
+- 세션 종료 시 즉시 `pty_kill cleanup=true`로 정리
+- 외부 PR 리뷰엔 사용 금지 (prompt-injection 위험)
+- production 환경/공유 머신 사용 금지
+- 자세한 제약은 `release-pipeline.md` "YOLO 모드 보안 제약" 섹션 참고
+
 ---
 
 ## 10. v0.3 → v0.4 전환 정리
