@@ -34,9 +34,8 @@ def get_callers(
     target = find_function(bv, addr_or_name)
     target_addr = getattr(target, "start", None)
 
-    refs = bv.get_code_refs(target_addr) if hasattr(bv, "get_code_refs") else []
     items: list[dict[str, Any]] = []
-    for ref in refs or []:
+    for ref in bv.get_code_refs(target_addr) or []:
         caller = getattr(ref, "function", None)
         items.append(
             {
@@ -78,14 +77,12 @@ def get_callees(
         site_addr = getattr(site, "address", None)
         if site_addr is None:
             continue
-        callee_addrs: list[int] = []
-        if hasattr(bv, "get_callees"):
-            callee_addrs = list(bv.get_callees(site_addr) or [])
+        callee_addrs = list(bv.get_callees(site_addr) or [])
         if not callee_addrs:
             items.append({"address": hex_or_none(site_addr), "target": None})
             continue
         for ca in callee_addrs:
-            callee_func = bv.get_function_at(ca) if hasattr(bv, "get_function_at") else None
+            callee_func = bv.get_function_at(ca)
             items.append(
                 {
                     "address": hex_or_none(site_addr),
