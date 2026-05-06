@@ -1,16 +1,4 @@
-"""Byte-pattern search across a BinaryView's readable segments.
-
-Implements two read-only tools:
-
-* ``search_bytes``   — locate exact byte sequences via ``bytes.find()`` over
-  each readable segment's data.
-* ``search_pattern`` — same as ``search_bytes`` but supports ``??`` wildcards
-  for individual bytes (e.g. ``"48 89 ?? c3"``).
-
-Both rely solely on ``bv.read(addr, length)`` and ``bv.segments``, so they
-work uniformly across real Binary Ninja and the mock backend without
-requiring any BN-version-specific search API.
-"""
+"""Byte-pattern search via bv.read over readable segments (exact + ?? wildcards)."""
 
 from __future__ import annotations
 
@@ -31,12 +19,9 @@ _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 
 
 def _normalise_pattern(pattern: str) -> str:
-    """Strip whitespace and commas, return contiguous hex/wildcard nibbles."""
     if not isinstance(pattern, str):
         raise byte_search_invalid_pattern(pattern, "pattern must be a string")
-    # Pre-gate raw input: a 1024-byte pattern is at most ~3KB raw (2 hex + 1 sep).
-    # Reject anything wildly larger before O(N) normalisation to thwart adversarial
-    # input from amplifying CPU cost.
+    # Pre-gate raw length so adversarial input can't amplify CPU before validation.
     if len(pattern) > MAX_PATTERN_BYTES * 4:
         raise byte_search_invalid_pattern(
             pattern[:200], f"raw pattern length exceeds {MAX_PATTERN_BYTES * 4} chars"
@@ -45,11 +30,6 @@ def _normalise_pattern(pattern: str) -> str:
 
 
 def _parse_hex_bytes(pattern: str) -> bytes:
-    """Parse a strict hex string (no wildcards) into bytes.
-
-    Raises BinjaError(BYTE_SEARCH_INVALID_PATTERN) for empty, odd-length, or
-    non-hex input, and for patterns exceeding ``MAX_PATTERN_BYTES``.
-    """
     cleaned = _normalise_pattern(pattern)
     if not cleaned:
         raise byte_search_invalid_pattern(pattern, "pattern is empty")
@@ -73,12 +53,7 @@ def _parse_hex_bytes(pattern: str) -> bytes:
 
 
 def _parse_pattern_with_wildcards(pattern: str) -> tuple[bytes, bytes]:
-    """Parse a hex pattern with optional ``??`` wildcards.
-
-    Returns ``(value, mask)`` where ``mask[i] == 0xff`` means the byte at
-    position ``i`` must equal ``value[i]``, and ``mask[i] == 0x00`` means
-    that byte position is a wildcard.
-    """
+    """Return (value, mask) where mask[i]==0xff is a fixed byte, 0x00 is a wildcard."""
     cleaned = _normalise_pattern(pattern)
     if not cleaned:
         raise byte_search_invalid_pattern(pattern, "pattern is empty")
@@ -101,7 +76,6 @@ def _parse_pattern_with_wildcards(pattern: str) -> tuple[bytes, bytes]:
             continue
         for j, ch in enumerate(pair):
             if ch == "?":
-                # Half-wildcards (e.g. "4?") are not supported — keep parser strict.
                 raise byte_search_invalid_pattern(
                     pattern,
                     f"single-nibble wildcard at position {2 * i + j};"
@@ -114,7 +88,6 @@ def _parse_pattern_with_wildcards(pattern: str) -> tuple[bytes, bytes]:
         value[i] = int(pair, 16)
         mask[i] = 0xFF
     if not any(mask):
-        # All wildcards would match every byte — refuse.
         raise byte_search_invalid_pattern(
             pattern, "pattern is entirely wildcards; at least one fixed byte required"
         )
@@ -122,7 +95,6 @@ def _parse_pattern_with_wildcards(pattern: str) -> tuple[bytes, bytes]:
 
 
 def _resolve_bound(value: Any) -> int | None:
-    """Resolve a start/end argument (None|int|hex-str) to an int address."""
     if value is None:
         return None
     if isinstance(value, int):
@@ -133,7 +105,6 @@ def _resolve_bound(value: Any) -> int | None:
 
 
 def _iter_readable_segments(bv: Any):
-    """Yield (start, end) for each readable segment, sorted by start."""
     segs = []
     for seg in getattr(bv, "segments", []) or []:
         if not getattr(seg, "readable", False):
@@ -150,7 +121,7 @@ def _iter_readable_segments(bv: Any):
 def _scan_segment_exact(
     data: bytes, base: int, needle: bytes, results: list[dict[str, Any]]
 ) -> bool:
-    """Append exact matches; return True if MAX_RESULTS reached."""
+    """Append exact matches (overlapping). Returns True if MAX_RESULTS reached."""
     pos = 0
     nlen = len(needle)
     while True:
@@ -160,7 +131,7 @@ def _scan_segment_exact(
         results.append({"address": hex_or_none(base + idx)})
         if len(results) >= MAX_RESULTS:
             return True
-        pos = idx + 1  # allow overlapping matches
+        pos = idx + 1
         if pos + nlen > len(data):
             return False
 
@@ -172,12 +143,11 @@ def _scan_segment_masked(
     mask: bytes,
     results: list[dict[str, Any]],
 ) -> bool:
-    """Append masked (wildcard) matches; return True if MAX_RESULTS reached."""
+    """Append masked matches anchored on the first fixed byte. Returns True if capped."""
     nlen = len(value)
     if nlen > len(data):
         return False
-    # Anchor scan on the first fixed byte. _parse_pattern_with_wildcards
-    # guarantees at least one fixed byte, so anchor_idx is always >= 0.
+    # _parse_pattern_with_wildcards guarantees at least one fixed byte.
     anchor_idx = mask.find(b"\xff")
     anchor_byte = bytes([value[anchor_idx]])
     last_start = len(data) - nlen
@@ -196,7 +166,6 @@ def _scan_segment_masked(
 
 
 def _matches_at(data: bytes, start: int, value: bytes, mask: bytes) -> bool:
-    """Return True if data[start:start+len(value)] matches value under mask."""
     for i, m in enumerate(mask):
         if m and data[start + i] != value[i]:
             return False
@@ -211,15 +180,10 @@ def _search(
     start: int | None,
     end: int | None,
 ) -> tuple[list[dict[str, Any]], bool]:
-    """Run a byte search across readable segments.
-
-    Returns ``(results, capped)`` where ``capped`` is True iff MAX_RESULTS
-    was hit and the scan stopped early.
-    """
+    """Scan readable segments. Returns (results, capped) where capped is True if MAX_RESULTS hit."""
     results: list[dict[str, Any]] = []
     nlen = len(value)
     for seg_start, seg_end in _iter_readable_segments(bv):
-        # Apply [start, end) clamp across segments.
         s = seg_start if start is None else max(seg_start, start)
         e = seg_end if end is None else min(seg_end, end)
         if e <= s or e - s < nlen:
