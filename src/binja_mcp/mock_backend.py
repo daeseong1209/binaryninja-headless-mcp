@@ -16,6 +16,7 @@ import uuid
 from dataclasses import dataclass, field
 from enum import IntEnum
 from pathlib import Path
+from typing import Any
 
 
 class MockSymbolType(IntEnum):
@@ -80,6 +81,9 @@ class MockVariable:
     type_str: str = "int"
     storage: int = 0
     kind: str = "local"  # "parameter" or "local"
+    # Mirrors real BN VariableSourceType; None = stack-equivalent (safe target).
+    source_type: Any = None
+    index: int = 0
 
 
 @dataclass

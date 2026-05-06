@@ -20,14 +20,33 @@ from ._helpers import (
 )
 
 
-def _variable_to_dict(v: Any, fallback_index: int) -> dict[str, Any]:
+def _source_type_name(v: Any) -> str:
+    """Return a string-stable VariableSourceType name (Stack/Register/Flag/...)."""
+    st = getattr(v, "source_type", None)
+    if st is None:
+        return "Stack"  # mock or older BN — treat as user-meaningful
+    name = getattr(st, "name", None)
+    if isinstance(name, str):
+        return name.replace("VariableSourceType", "") or name
+    return str(st)
+
+
+def _is_safe_target(v: Any, param_ids: set[tuple[Any, ...]]) -> bool:
+    """True for parameters and stack locals; False for register/flag temporaries.
+
+    Real BN's ``func.vars`` includes compiler-generated register temporaries
+    (``rax``, ``rax_1``, ``cond:0``, ...) which the LLM should not rename or
+    retype — doing so corrupts analysis state. Parameters are always safe
+    (they may use register storage on x64 calling conventions).
+    """
+    if _variable_identity(v) in param_ids:
+        return True
+    return _source_type_name(v).startswith("Stack")
+
+
+def _variable_to_dict(v: Any, fallback_index: int, *, kind: str) -> dict[str, Any]:
     var_type = getattr(v, "type", None) or getattr(v, "type_str", None)
     type_str = str(var_type) if var_type is not None else ""
-
-    raw_kind = getattr(v, "kind", None)
-    # Real BN has no "parameter vs local" tag; list_function_variables stamps
-    # kind from parameter_vars membership.
-    kind = raw_kind if isinstance(raw_kind, str) else "local"
 
     storage = getattr(v, "storage", None)
     index = getattr(v, "index", None)
@@ -40,6 +59,7 @@ def _variable_to_dict(v: Any, fallback_index: int) -> dict[str, Any]:
         "kind": kind,
         "index": int(index),
         "storage": int(storage) if isinstance(storage, int) else storage,
+        "source_type": _source_type_name(v),
     }
 
 
@@ -50,33 +70,34 @@ def list_function_variables(
     ctx: Context,
     offset: int = 0,
     limit: int = 100,
+    include_temporaries: bool = False,
 ) -> dict[str, Any]:
-    """List parameters and locals of a function (paginated).
+    """List parameters and stack locals of a function (paginated).
 
-    Variables are returned in ``parameter_vars`` order followed by remaining
-    locals from ``func.vars``, deduplicated by storage. Each item:
-    ``{name, type, kind: "parameter"|"local", index, storage}``.
+    Default output includes parameters + stack locals only.
+    Real BN's ``func.vars`` also surfaces compiler-generated register and
+    flag temporaries (``rax``, ``cond:0``, ...) which are unsafe to mutate;
+    pass ``include_temporaries=True`` to see them (read-only inspection).
+
+    Each item: ``{name, type, kind, index, storage, source_type}`` where
+    ``kind`` ∈ {"parameter", "local"} and ``source_type`` is the BN
+    VariableSourceType name (e.g. "Stack", "Register", "Flag").
     """
     sup = get_supervisor(ctx)
     session = get_session(sup, binary_id)
     bv = session.bv
 
     func = find_function(bv, function)
-    # Build the parameter set keyed by full identity (source_type, index, storage)
-    # so a local that happens to share storage with a parameter (e.g. register
-    # reused) is not misclassified.
     param_ids: set[tuple[Any, ...]] = {
         _variable_identity(p) for p in (getattr(func, "parameter_vars", None) or [])
     }
 
     items: list[dict[str, Any]] = []
     for i, v in enumerate(iter_function_variables(func)):
-        d = _variable_to_dict(v, fallback_index=i)
-        if _variable_identity(v) in param_ids:
-            d["kind"] = "parameter"
-        elif d["kind"] not in ("parameter", "local"):
-            d["kind"] = "local"
-        items.append(d)
+        if not include_temporaries and not _is_safe_target(v, param_ids):
+            continue
+        kind = "parameter" if _variable_identity(v) in param_ids else "local"
+        items.append(_variable_to_dict(v, fallback_index=i, kind=kind))
 
     return paginate(items, offset=offset, limit=limit)
 
@@ -106,9 +127,16 @@ def rename_variable(
     func = find_function(bv, function)
     var = find_variable(func, var_name)
 
-    # Identity-based parameter check (matches list_function_variables).
     params = getattr(func, "parameter_vars", None) or []
     param_ids = {_variable_identity(p) for p in params}
+    if not _is_safe_target(var, param_ids):
+        # Refuse to rename register/flag temporaries — they're compiler-generated
+        # and mutating them corrupts analysis state.
+        raise ValueError(
+            f"variable {var_name!r} is a {_source_type_name(var)} temporary; "
+            "rename_variable only supports parameters and stack locals"
+        )
+
     var_storage = getattr(var, "storage", None)
     kind = "parameter" if _variable_identity(var) in param_ids else "local"
 
@@ -153,6 +181,14 @@ def set_variable_type(
 
     func = find_function(bv, function)
     var = find_variable(func, var_name)
+
+    params = getattr(func, "parameter_vars", None) or []
+    param_ids = {_variable_identity(p) for p in params}
+    if not _is_safe_target(var, param_ids):
+        raise ValueError(
+            f"variable {var_name!r} is a {_source_type_name(var)} temporary; "
+            "set_variable_type only supports parameters and stack locals"
+        )
 
     try:
         parsed = bv.parse_type_string(type_str)
