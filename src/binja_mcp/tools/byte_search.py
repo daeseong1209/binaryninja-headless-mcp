@@ -15,6 +15,10 @@ from ._helpers import get_session, hex_or_none
 # DoS guards
 MAX_PATTERN_BYTES = 1024
 MAX_RESULTS = 10_000
+# Each segment scan is split into chunks of this size, with overlap = pattern_len-1,
+# so memory usage stays bounded regardless of segment size. 4 MiB balances
+# bytes.find() overhead vs. peak RSS.
+SEGMENT_CHUNK_BYTES = 4 * 1024 * 1024
 _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 
 
@@ -100,11 +104,24 @@ def _resolve_bound(value: Any) -> int | None:
     if isinstance(value, int):
         return value
     if isinstance(value, str):
-        return parse_address(value)
-    raise TypeError(f"address must be int, str, or None, got {type(value).__name__}")
+        try:
+            return parse_address(value)
+        except (ValueError, TypeError) as exc:
+            from ..errors import invalid_address  # noqa: PLC0415 — avoid circular import
+
+            raise invalid_address(value) from exc
+    from ..errors import invalid_address  # noqa: PLC0415
+
+    raise invalid_address(value)
 
 
 def _iter_readable_segments(bv: Any):
+    """Yield (start, end_clamped) for every readable segment.
+
+    end_clamped is the smaller of seg.end and (seg.start + seg.data_length) when
+    data_length is exposed, so we never read past the file-backed region (avoids
+    sparse zero-byte hallucination on segments larger than their data).
+    """
     segs = []
     for seg in getattr(bv, "segments", []) or []:
         if not getattr(seg, "readable", False):
@@ -113,7 +130,13 @@ def _iter_readable_segments(bv: Any):
         end = getattr(seg, "end", None)
         if start is None or end is None or end <= start:
             continue
-        segs.append((int(start), int(end)))
+        start_i, end_i = int(start), int(end)
+        data_length = getattr(seg, "data_length", None)
+        if isinstance(data_length, int) and data_length > 0:
+            end_i = min(end_i, start_i + data_length)
+        if end_i <= start_i:
+            continue
+        segs.append((start_i, end_i))
     segs.sort()
     return segs
 
@@ -180,26 +203,45 @@ def _search(
     start: int | None,
     end: int | None,
 ) -> tuple[list[dict[str, Any]], bool]:
-    """Scan readable segments. Returns (results, capped) where capped is True if MAX_RESULTS hit."""
+    """Scan readable segments in bounded chunks.
+
+    Each segment is iterated in SEGMENT_CHUNK_BYTES windows with (pattern_len-1)
+    overlap so matches straddling chunk boundaries are still found. Memory usage
+    stays bounded by the chunk size, not the segment size — defends against
+    multi-GB mapped regions.
+    """
+    if start is not None and end is not None and end <= start:
+        return [], False
     results: list[dict[str, Any]] = []
     nlen = len(value)
+    overlap = max(nlen - 1, 0)
     for seg_start, seg_end in _iter_readable_segments(bv):
         s = seg_start if start is None else max(seg_start, start)
         e = seg_end if end is None else min(seg_end, end)
         if e <= s or e - s < nlen:
             continue
-        try:
-            data = bv.read(s, e - s)
-        except Exception:
-            continue
-        if not data or len(data) < nlen:
-            continue
-        if mask is None:
-            capped = _scan_segment_exact(data, s, value, results)
-        else:
-            capped = _scan_segment_masked(data, s, value, mask, results)
-        if capped:
-            return results, True
+        cursor = s
+        while cursor < e:
+            chunk_end = min(cursor + SEGMENT_CHUNK_BYTES, e)
+            length = chunk_end - cursor
+            if length < nlen:
+                break
+            try:
+                data = bv.read(cursor, length)
+            except Exception:
+                break  # backend error — skip rest of this segment
+            if not data or len(data) < nlen:
+                break
+            if mask is None:
+                capped = _scan_segment_exact(data, cursor, value, results)
+            else:
+                capped = _scan_segment_masked(data, cursor, value, mask, results)
+            if capped:
+                return results, True
+            if chunk_end >= e:
+                break
+            # Advance with overlap so a match straddling cursor+chunk doesn't slip through
+            cursor = chunk_end - overlap
     return results, False
 
 
