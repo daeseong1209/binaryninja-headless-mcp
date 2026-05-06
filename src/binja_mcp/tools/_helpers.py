@@ -182,20 +182,36 @@ def find_function(bv: Any, addr_or_name: str | int) -> Any:
     raise function_not_found(addr_or_name)
 
 
+def _variable_identity(v: Any) -> tuple[Any, ...]:
+    """Compute a stable identity for a Variable.
+
+    Real BN's Variable identity is (source_type, index, storage); identifier()
+    is also exposed on some versions but is derived from the same triple.
+    Falling back to storage-only would drop variables that share storage but
+    differ in source_type/index (e.g. same register reused across phi nodes).
+    """
+    return (
+        getattr(v, "source_type", None),
+        getattr(v, "index", None),
+        getattr(v, "storage", None),
+    )
+
+
 def iter_function_variables(func: Any) -> list[Any]:
-    """Return parameters first, then locals (deduped by storage).
+    """Return parameters first, then locals (deduped by full identity).
 
     Real BN exposes ``func.parameter_vars`` plus ``func.vars`` (some versions
     expose ``func.variables``); the mock backend mirrors both. A var present
-    in ``parameter_vars`` is also in ``vars``, so we dedupe by ``storage``.
+    in ``parameter_vars`` is also in ``vars``, so we dedupe by the full
+    (source_type, index, storage) identity rather than storage alone.
     """
     out: list[Any] = []
-    seen: set[Any] = set()
+    seen: set[tuple[Any, ...]] = set()
 
     params = getattr(func, "parameter_vars", None) or []
     try:
         for v in params:
-            key = getattr(v, "storage", None)
+            key = _variable_identity(v)
             if key in seen:
                 continue
             seen.add(key)
@@ -208,7 +224,7 @@ def iter_function_variables(func: Any) -> list[Any]:
         all_vars = getattr(func, "variables", None) or []
     try:
         for v in all_vars:
-            key = getattr(v, "storage", None)
+            key = _variable_identity(v)
             if key in seen:
                 continue
             seen.add(key)

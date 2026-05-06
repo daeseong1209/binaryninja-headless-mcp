@@ -11,6 +11,7 @@ from ..registry import tool
 from ..server import get_supervisor
 from ..utils import paginate
 from ._helpers import (
+    _variable_identity,
     find_function,
     find_variable,
     get_session,
@@ -61,15 +62,17 @@ def list_function_variables(
     bv = session.bv
 
     func = find_function(bv, function)
-    param_storages: set[Any] = set()
-    for p in getattr(func, "parameter_vars", None) or []:
-        param_storages.add(getattr(p, "storage", None))
+    # Build the parameter set keyed by full identity (source_type, index, storage)
+    # so a local that happens to share storage with a parameter (e.g. register
+    # reused) is not misclassified.
+    param_ids: set[tuple[Any, ...]] = {
+        _variable_identity(p) for p in (getattr(func, "parameter_vars", None) or [])
+    }
 
     items: list[dict[str, Any]] = []
     for i, v in enumerate(iter_function_variables(func)):
         d = _variable_to_dict(v, fallback_index=i)
-        # Stamp kind from membership in parameter_vars (authoritative on real BN).
-        if getattr(v, "storage", None) in param_storages:
+        if _variable_identity(v) in param_ids:
             d["kind"] = "parameter"
         elif d["kind"] not in ("parameter", "local"):
             d["kind"] = "local"
@@ -103,11 +106,11 @@ def rename_variable(
     func = find_function(bv, function)
     var = find_variable(func, var_name)
 
-    # Determine kind based on parameter membership (authoritative).
+    # Identity-based parameter check (matches list_function_variables).
     params = getattr(func, "parameter_vars", None) or []
-    param_storages = {getattr(p, "storage", None) for p in params}
+    param_ids = {_variable_identity(p) for p in params}
     var_storage = getattr(var, "storage", None)
-    kind = "parameter" if var_storage in param_storages else "local"
+    kind = "parameter" if _variable_identity(var) in param_ids else "local"
 
     with undo_transaction(bv):
         if hasattr(bv, "rename_variable"):
