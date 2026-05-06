@@ -1,11 +1,4 @@
-"""Function variable inspection and renaming tools.
-
-Adds three v0.4 tools that operate on a function's parameters and locals:
-
-* ``list_function_variables`` — paginated listing with kind/storage/type
-* ``rename_variable`` — rename a parameter or local by current name
-* ``set_variable_type`` — re-type a variable via ``parse_type_string``
-"""
+"""Function variable tools: list, rename, and set type for params/locals."""
 
 from __future__ import annotations
 
@@ -27,20 +20,13 @@ from ._helpers import (
 
 
 def _variable_to_dict(v: Any, fallback_index: int) -> dict[str, Any]:
-    """Convert a Variable-like object into a JSON-friendly dict."""
-    var_type = getattr(v, "type", None)
-    if var_type is None:
-        var_type = getattr(v, "type_str", None)
+    var_type = getattr(v, "type", None) or getattr(v, "type_str", None)
     type_str = str(var_type) if var_type is not None else ""
 
     raw_kind = getattr(v, "kind", None)
-    if isinstance(raw_kind, str):
-        kind = raw_kind
-    else:
-        # Real BN exposes source_type (Stack/Register VariableSourceType) but
-        # not a clean "parameter vs local" tag. Caller stamps the kind below
-        # based on parameter_vars membership (authoritative).
-        kind = "local"
+    # Real BN has no "parameter vs local" tag; list_function_variables stamps
+    # kind from parameter_vars membership.
+    kind = raw_kind if isinstance(raw_kind, str) else "local"
 
     storage = getattr(v, "storage", None)
     index = getattr(v, "index", None)
@@ -51,7 +37,7 @@ def _variable_to_dict(v: Any, fallback_index: int) -> dict[str, Any]:
         "name": getattr(v, "name", "<unnamed>"),
         "type": type_str,
         "kind": kind,
-        "index": int(index) if index is not None else fallback_index,
+        "index": int(index),
         "storage": int(storage) if isinstance(storage, int) else storage,
     }
 
